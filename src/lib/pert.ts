@@ -1,145 +1,377 @@
-// src/lib/pert.ts - VERSION ENTIÈREMENT CORRIGÉE
+// src/lib/pert-refactored.ts - VERSION OPTIMISÉE ET REFACTORISÉE
 
 import { Task, PertNode, DiagramData, Link } from './types';
 
-export function calculatePertData(tasks: Task[]): DiagramData {
-  const workingTasks = JSON.parse(JSON.stringify(tasks)) as Task[];
-
-  // 1. Tri topologique (même algorithme que Gantt)
-  const sortedTasks = topologicalSortCorrect(workingTasks);
-
-  // 2. PERT - Forward Pass (dates au plus tôt)
-  calculateForwardPass(sortedTasks);
-
-  // 3. PERT - Backward Pass (dates au plus tard)
-  calculateBackwardPass(sortedTasks);
-
-  // 4. Calcul des marges et chemin critique
-  calculateSlackAndCriticalPath(sortedTasks);
-
-  const projectDuration = Math.max(...sortedTasks.map(t => t.earliestFinish || 0));
-  const criticalPath = sortedTasks
-      .filter(task => task.isCritical)
-      .map(task => task.id);
-
-  return {
-    tasks: sortedTasks,
-    criticalPath,
-    projectDuration
-  };
+/**
+ * Interface pour les paramètres de calcul PERT
+ */
+interface PertCalculationParams {
+  tasks: Task[];
+  validateCycles?: boolean;
+  toleranceSlack?: number;
 }
 
 /**
- * FORWARD PASS - Calcul des dates au plus tôt
+ * Interface pour la configuration du layout
  */
-function calculateForwardPass(tasks: Task[]): void {
-  const taskMap = new Map<string, Task>();
-  tasks.forEach(task => taskMap.set(task.id, task));
+interface LayoutConfig {
+  width: number;
+  height: number;
+  levelSpacing: number;
+  nodeSpacing: number;
+  margin: { top: number; right: number; bottom: number; left: number };
+}
 
-  tasks.forEach(task => {
-    if (task.predecessors.length === 0) {
-      task.earliestStart = 0;
-    } else {
-      task.earliestStart = Math.max(
-          ...task.predecessors.map(predId => {
-            const pred = taskMap.get(predId);
-            return pred ? (pred.earliestFinish || 0) : 0;
-          })
-      );
+/**
+ * Classe utilitaire pour les calculs PERT
+ */
+class PertCalculator {
+  private taskMap: Map<string, Task>;
+  private successorsMap: Map<string, string[]>;
+  private predecessorsMap: Map<string, string[]>;
+  private toleranceSlack: number;
+
+  constructor(tasks: Task[], toleranceSlack = 0.001) {
+    this.toleranceSlack = toleranceSlack;
+    this.taskMap = new Map();
+    this.successorsMap = new Map();
+    this.predecessorsMap = new Map();
+    this.initializeMaps(tasks);
+  }
+
+  /**
+   * Initialisation des maps pour optimiser les accès
+   */
+  private initializeMaps(tasks: Task[]): void {
+    // Initialiser les maps
+    tasks.forEach(task => {
+      this.taskMap.set(task.id, task);
+      this.successorsMap.set(task.id, []);
+      this.predecessorsMap.set(task.id, [...task.predecessors]);
+    });
+
+    // Construire la map des successeurs
+    tasks.forEach(task => {
+      task.predecessors.forEach(predId => {
+        if (this.successorsMap.has(predId)) {
+          this.successorsMap.get(predId)?.push(task.id);
+        }
+      });
+    });
+  }
+
+  /**
+   * Tri topologique avec détection de cycles optimisée
+   */
+  public topologicalSort(): Task[] {
+    const inDegree = new Map<string, number>();
+    const result: Task[] = [];
+
+    // Initialiser les degrés entrants
+    this.taskMap.forEach((task, id) => {
+      inDegree.set(id, this.predecessorsMap.get(id)?.length || 0);
+    });
+
+    // Queue des tâches sans prédécesseurs
+    const queue: string[] = [];
+    inDegree.forEach((degree, taskId) => {
+      if (degree === 0) queue.push(taskId);
+    });
+
+    // Algorithme de Kahn
+    while (queue.length > 0) {
+      const currentId = queue.shift()!;
+      const currentTask = this.taskMap.get(currentId)!;
+      result.push(currentTask);
+
+      // Réduire le degré des successeurs
+      const successors = this.successorsMap.get(currentId) || [];
+      successors.forEach(successorId => {
+        const newDegree = (inDegree.get(successorId) || 0) - 1;
+        inDegree.set(successorId, newDegree);
+
+        if (newDegree === 0) {
+          queue.push(successorId);
+        }
+      });
     }
 
-    task.earliestFinish = (task.earliestStart || 0) + task.duration;
-  });
-}
+    // Vérification des cycles
+    if (result.length !== this.taskMap.size) {
+      const remainingTasks = Array.from(this.taskMap.keys())
+          .filter(id => !result.some(task => task.id === id));
+      throw new Error(`Cycle détecté dans les dépendances: ${remainingTasks.join(', ')}`);
+    }
 
-/**
- * BACKWARD PASS - Calcul des dates au plus tard
- */
-function calculateBackwardPass(tasks: Task[]): void {
-  const taskMap = new Map<string, Task>();
-  tasks.forEach(task => taskMap.set(task.id, task));
+    return result;
+  }
 
-  // Fin du projet
-  const projectEnd = Math.max(...tasks.map(t => t.earliestFinish || 0));
+  /**
+   * Forward Pass - Calcul optimisé des dates au plus tôt
+   */
+  public calculateForwardPass(sortedTasks: Task[]): void {
+    sortedTasks.forEach(task => {
+      const predecessors = this.predecessorsMap.get(task.id) || [];
 
-  // Map des successeurs
-  const successorsMap = new Map<string, string[]>();
-  tasks.forEach(task => {
-    successorsMap.set(task.id, []);
-  });
+      if (predecessors.length === 0) {
+        task.earliestStart = 0;
+      } else {
+        task.earliestStart = Math.max(
+            ...predecessors.map(predId => {
+              const pred = this.taskMap.get(predId);
+              return pred?.earliestFinish ?? 0;
+            })
+        );
+      }
 
-  tasks.forEach(task => {
-    task.predecessors.forEach(predId => {
-      if (successorsMap.has(predId)) {
-        successorsMap.get(predId)?.push(task.id);
+      task.earliestFinish = task.earliestStart + task.duration;
+    });
+  }
+
+  /**
+   * Backward Pass - Calcul optimisé des dates au plus tard
+   */
+  public calculateBackwardPass(sortedTasks: Task[]): void {
+    const projectEnd = Math.max(...sortedTasks.map(t => t.earliestFinish ?? 0));
+
+    // Parcours inverse pour le backward pass
+    [...sortedTasks].reverse().forEach(task => {
+      const successors = this.successorsMap.get(task.id) || [];
+
+      if (successors.length === 0) {
+        task.latestFinish = projectEnd;
+      } else {
+        task.latestFinish = Math.min(
+            ...successors.map(succId => {
+              const succ = this.taskMap.get(succId);
+              return succ?.latestStart ?? projectEnd;
+            })
+        );
+      }
+
+      task.latestStart = task.latestFinish - task.duration;
+    });
+  }
+
+  /**
+   * Calcul des marges et identification du chemin critique
+   */
+  public calculateSlackAndCriticalPath(tasks: Task[]): string[] {
+    const criticalPath: string[] = [];
+
+    tasks.forEach(task => {
+      // Calcul de la marge (slack)
+      task.slack = (task.latestStart ?? 0) - (task.earliestStart ?? 0);
+
+      // Détermination si la tâche est critique
+      task.isCritical = Math.abs(task.slack) < this.toleranceSlack;
+
+      // Compatibilité avec Gantt
+      task.start = task.earliestStart;
+      task.end = task.earliestFinish;
+
+      // Construction du chemin critique
+      if (task.isCritical) {
+        criticalPath.push(task.id);
       }
     });
-  });
 
-  // Backward pass
-  [...tasks].reverse().forEach(task => {
-    const successors = successorsMap.get(task.id) || [];
+    return this.orderCriticalPath(criticalPath, tasks);
+  }
 
-    if (successors.length === 0) {
-      task.latestFinish = projectEnd;
-    } else {
-      task.latestFinish = Math.min(
-          ...successors.map(succId => {
-            const succ = taskMap.get(succId);
-            return succ ? (succ.latestStart || projectEnd) : projectEnd;
-          })
-      );
-    }
+  /**
+   * Ordonner le chemin critique selon les dépendances
+   */
+  private orderCriticalPath(criticalTaskIds: string[], tasks: Task[]): string[] {
+    const criticalTasks = tasks.filter(t => criticalTaskIds.includes(t.id));
 
-    task.latestStart = (task.latestFinish || 0) - task.duration;
-  });
+    // Tri par earliestStart pour avoir l'ordre chronologique
+    return criticalTasks
+        .sort((a, b) => (a.earliestStart ?? 0) - (b.earliestStart ?? 0))
+        .map(t => t.id);
+  }
 }
 
 /**
- * CALCUL DES MARGES ET CHEMIN CRITIQUE
+ * Classe pour la gestion du layout PERT
  */
-function calculateSlackAndCriticalPath(tasks: Task[]): void {
-  tasks.forEach(task => {
-    // Marge = LS - ES (ou LF - EF)
-    task.slack = (task.latestStart || 0) - (task.earliestStart || 0);
+class PertLayoutManager {
+  private config: LayoutConfig;
+  private nodeMap: Map<string, PertNode>;
+  private levels: Map<number, PertNode[]>;
 
-    // Chemin critique = marge nulle
-    task.isCritical = Math.abs(task.slack || 0) < 0.001;
+  constructor(config: LayoutConfig) {
+    this.config = config;
+    this.nodeMap = new Map();
+    this.levels = new Map();
+  }
 
-    // Pour compatibilité Gantt
-    task.start = task.earliestStart;
-    task.end = task.earliestFinish;
-  });
+  /**
+   * Calcul des niveaux hiérarchiques optimisé
+   */
+  public calculateLevels(nodes: PertNode[], links: Link[]): void {
+    // Réinitialiser
+    this.nodeMap.clear();
+    this.levels.clear();
+
+    nodes.forEach(node => this.nodeMap.set(node.id, node));
+
+    // Construire la map des prédécesseurs
+    const predecessorsMap = new Map<string, string[]>();
+    nodes.forEach(node => predecessorsMap.set(node.id, []));
+
+    links.forEach(link => {
+      if (predecessorsMap.has(link.target)) {
+        predecessorsMap.get(link.target)?.push(link.source);
+      }
+    });
+
+    // Calcul récursif des niveaux avec mémoïsation
+    const visited = new Set<string>();
+
+    const calculateLevel = (nodeId: string): number => {
+      if (visited.has(nodeId)) {
+        return this.nodeMap.get(nodeId)?.level ?? 0;
+      }
+
+      visited.add(nodeId);
+      const node = this.nodeMap.get(nodeId)!;
+      const preds = predecessorsMap.get(nodeId) || [];
+
+      node.level = preds.length === 0 ? 0 :
+          Math.max(...preds.map(predId => calculateLevel(predId))) + 1;
+
+      // Ajouter au niveau approprié
+      if (!this.levels.has(node.level)) {
+        this.levels.set(node.level, []);
+      }
+      this.levels.get(node.level)?.push(node);
+
+      return node.level;
+    };
+
+    nodes.forEach(node => calculateLevel(node.id));
+  }
+
+  /**
+   * Positionnement optimisé des nœuds
+   */
+  public positionNodes(): PertNode[] {
+    const maxLevel = Math.max(...Array.from(this.levels.keys()));
+    const levelSpacing = Math.min(
+        this.config.levelSpacing,
+        (this.config.width - this.config.margin.left - this.config.margin.right) / (maxLevel + 1)
+    );
+
+    // Calculer l'espacement vertical adaptatif
+    const maxNodesInLevel = Math.max(...Array.from(this.levels.values()).map(nodes => nodes.length));
+    const nodeSpacing = Math.min(
+        this.config.nodeSpacing,
+        (this.config.height - this.config.margin.top - this.config.margin.bottom) / maxNodesInLevel
+    );
+
+    // Positionner chaque niveau
+    Array.from(this.levels.keys()).sort((a, b) => a - b).forEach(levelIndex => {
+      const levelNodes = this.levels.get(levelIndex) || [];
+      const x = levelIndex * levelSpacing + this.config.margin.left;
+
+      // Centrage vertical
+      const totalHeight = (levelNodes.length - 1) * nodeSpacing;
+      const startY = this.config.margin.top + Math.max(0, (this.config.height - this.config.margin.top - this.config.margin.bottom - totalHeight) / 2);
+
+      levelNodes.forEach((node, nodeIndex) => {
+        node.x = x;
+        node.y = startY + nodeIndex * nodeSpacing;
+      });
+    });
+
+    return Array.from(this.nodeMap.values());
+  }
 }
 
 /**
- * CRÉER LES NŒUDS PERT AVEC FORMAT CORRECT
+ * FONCTIONS PUBLIQUES OPTIMISÉES
+ */
+
+/**
+ * Calcul principal des données PERT - Version optimisée
+ */
+export function calculatePertData(
+    tasks: Task[],
+    options: Partial<PertCalculationParams> = {}
+): DiagramData {
+  const { validateCycles = true, toleranceSlack = 0.001 } = options;
+
+  if (!tasks.length) {
+    throw new Error('Aucune tâche fournie pour le calcul PERT');
+  }
+
+  // Validation des tâches
+  validateTasks(tasks);
+
+  const calculator = new PertCalculator(tasks, toleranceSlack);
+
+  try {
+    // 1. Tri topologique
+    const sortedTasks = calculator.topologicalSort();
+
+    // 2. Forward Pass
+    calculator.calculateForwardPass(sortedTasks);
+
+    // 3. Backward Pass
+    calculator.calculateBackwardPass(sortedTasks);
+
+    // 4. Calcul des marges et chemin critique
+    const criticalPath = calculator.calculateSlackAndCriticalPath(sortedTasks);
+
+    const projectDuration = Math.max(...sortedTasks.map(t => t.earliestFinish ?? 0));
+
+    return {
+      tasks: sortedTasks,
+      criticalPath,
+      projectDuration
+    };
+
+  } catch (error) {
+    throw new Error(`Erreur dans le calcul PERT: ${error instanceof Error ? error.message : 'Erreur inconnue'}`);
+  }
+}
+
+/**
+ * Création des nœuds PERT optimisée
  */
 export function createPertNodes(tasks: Task[]): PertNode[] {
   return tasks.map(task => ({
     id: task.id,
-    name: task.name || "Unnamed",
-    earliestStart: task.earliestStart || 0,
-    earliestFinish: task.earliestFinish || 0,
-    latestStart: task.latestStart || 0,
-    latestFinish: task.latestFinish || 0,
-    slack: task.slack || 0,
-    isCritical: task.isCritical || false,
+    name: task.name || "Tâche sans nom",
+    earliestStart: task.earliestStart ?? 0,
+    earliestFinish: task.earliestFinish ?? 0,
+    latestStart: task.latestStart ?? 0,
+    latestFinish: task.latestFinish ?? 0,
+    slack: task.slack ?? 0,
+    isCritical: task.isCritical ?? false,
     duration: task.duration,
     x: 0,
     y: 0,
-    level: task.level || 0 // ✅ Ajout de la propriété level
+    level: 0
   }));
 }
 
 /**
- * CRÉER LES LIENS PERT
+ * Création des liens PERT avec gestion des types
  */
 export function createPertLinks(tasks: Task[]): Link[] {
   const links: Link[] = [];
+  const taskIds = new Set(tasks.map(t => t.id));
 
   tasks.forEach(task => {
     task.predecessors.forEach(predId => {
+      // Validation de l'existence du prédécesseur
+      if (!taskIds.has(predId)) {
+        console.warn(`Prédécesseur ${predId} non trouvé pour la tâche ${task.id}`);
+        return;
+      }
+
       links.push({
         source: predId,
         target: task.id,
@@ -152,141 +384,114 @@ export function createPertLinks(tasks: Task[]): Link[] {
 }
 
 /**
- * LAYOUT INTELLIGENT POUR PERT - Par niveaux logiques CORRIGÉ
+ * Layout intelligent des nœuds PERT
  */
 export function layoutPertNodes(
     nodes: PertNode[],
     links: Link[],
     dimensions = { width: 1000, height: 600 }
 ): PertNode[] {
-  const workingNodes = [...nodes];
+  const config: LayoutConfig = {
+    width: dimensions.width,
+    height: dimensions.height,
+    levelSpacing: 350,
+    nodeSpacing: 140,
+    margin: { top: 80, right: 80, bottom: 80, left: 80 }
+  };
 
-  // 1. Calculer les niveaux basés sur les dépendances (algorithme de Kahn modifié)
-  const nodeMap = new Map<string, PertNode>();
-  workingNodes.forEach(node => nodeMap.set(node.id, node));
+  const layoutManager = new PertLayoutManager(config);
 
-  // Créer une map des prédécesseurs pour chaque nœud
-  const predecessorsMap = new Map<string, string[]>();
-  workingNodes.forEach(node => {
-    predecessorsMap.set(node.id, []);
-  });
+  // Calculer les niveaux
+  layoutManager.calculateLevels(nodes, links);
 
-  links.forEach(link => {
-    if (!predecessorsMap.has(link.target)) {
-      predecessorsMap.set(link.target, []);
-    }
-    predecessorsMap.get(link.target)?.push(link.source);
-  });
-
-  // Calculer le niveau de chaque nœud
-  const levels = new Map<number, PertNode[]>();
-  const visited = new Set<string>();
-
-  function calculateLevel(nodeId: string): number {
-    if (visited.has(nodeId)) {
-      const node = nodeMap.get(nodeId);
-      return node?.level ?? 0;
-    }
-
-    visited.add(nodeId);
-    const node = nodeMap.get(nodeId)!;
-    const preds = predecessorsMap.get(nodeId) || [];
-
-    if (preds.length === 0) {
-      node.level = 0;
-    } else {
-      node.level = Math.max(...preds.map(predId => calculateLevel(predId))) + 1;
-    }
-
-    // Ajouter au niveau correspondant
-    if (!levels.has(node.level)) {
-      levels.set(node.level, []);
-    }
-    levels.get(node.level)?.push(node);
-
-    return node.level;
-  }
-
-  // Calculer les niveaux pour tous les nœuds
-  workingNodes.forEach(node => calculateLevel(node.id));
-
-  // 2. Positionner les nœuds par niveau
-  const levelSpacing = 300; // Distance horizontale entre niveaux
-  const nodeSpacing = 120;  // Distance verticale entre nœuds du même niveau
-
-  // Trier les niveaux par clé
-  const sortedLevels = Array.from(levels.keys()).sort((a, b) => a - b);
-
-  sortedLevels.forEach(levelIndex => {
-    const levelNodes = levels.get(levelIndex) || [];
-    const x = levelIndex * levelSpacing + 50; // Position X du niveau
-
-    // Calculer la hauteur totale nécessaire pour ce niveau
-    const totalHeight = levelNodes.length * nodeSpacing;
-    const startY = Math.max(50, (dimensions.height - totalHeight) / 2);
-
-    levelNodes.forEach((node, nodeIndex) => {
-      node.x = x;
-      node.y = startY + nodeIndex * nodeSpacing;
-    });
-  });
-
-  return workingNodes;
+  // Positionner les nœuds
+  return layoutManager.positionNodes();
 }
 
 /**
- * TRI TOPOLOGIQUE CORRECT
+ * FONCTIONS UTILITAIRES
  */
-function topologicalSortCorrect(tasks: Task[]): Task[] {
-  const taskMap = new Map<string, Task>();
-  const inDegree = new Map<string, number>();
-  const adjList = new Map<string, string[]>();
 
-  // Initialisation
-  tasks.forEach(task => {
-    taskMap.set(task.id, task);
-    inDegree.set(task.id, 0);
-    adjList.set(task.id, []);
-  });
+/**
+ * Validation des tâches d'entrée
+ */
+function validateTasks(tasks: Task[]): void {
+  const errors: string[] = [];
+  const taskIds = new Set<string>();
 
-  // Construire le graphe
-  tasks.forEach(task => {
-    task.predecessors.forEach(predId => {
-      if (taskMap.has(predId)) {
-        adjList.get(predId)?.push(task.id);
-        inDegree.set(task.id, (inDegree.get(task.id) || 0) + 1);
-      }
-    });
-  });
+  tasks.forEach((task, index) => {
+    // Validation de base
+    if (!task.id || typeof task.id !== 'string') {
+      errors.push(`Tâche ${index}: ID manquant ou invalide`);
+    } else if (taskIds.has(task.id)) {
+      errors.push(`Tâche ${task.id}: ID dupliqué`);
+    } else {
+      taskIds.add(task.id);
+    }
 
-  // Queue des nœuds sans prédécesseurs
-  const queue: string[] = [];
-  inDegree.forEach((degree, taskId) => {
-    if (degree === 0) {
-      queue.push(taskId);
+    if (!task.name || typeof task.name !== 'string') {
+      errors.push(`Tâche ${task.id || index}: Nom manquant ou invalide`);
+    }
+
+    if (typeof task.duration !== 'number' || task.duration <= 0) {
+      errors.push(`Tâche ${task.id || index}: Durée invalide (doit être > 0)`);
+    }
+
+    if (!Array.isArray(task.predecessors)) {
+      errors.push(`Tâche ${task.id || index}: Prédécesseurs invalides (doit être un tableau)`);
     }
   });
 
-  const result: Task[] = [];
+  if (errors.length > 0) {
+    throw new Error(`Validation échouée:\n${errors.join('\n')}`);
+  }
+}
 
-  while (queue.length > 0) {
-    const currentId = queue.shift()!;
-    const currentTask = taskMap.get(currentId)!;
-    result.push(currentTask);
+/**
+ * Utilitaire pour diagnostiquer les problèmes de performance
+ */
+export function diagnosticPertCalculation(tasks: Task[]): {
+  taskCount: number;
+  linkCount: number;
+  maxLevel: number;
+  cycleDetected: boolean;
+  performanceMetrics: {
+    calculationTime: number;
+    memoryUsage: string;
+  };
+} {
+  const startTime = performance.now();
 
-    adjList.get(currentId)?.forEach(successorId => {
-      const newDegree = (inDegree.get(successorId) || 0) - 1;
-      inDegree.set(successorId, newDegree);
+  try {
+    const result = calculatePertData(tasks);
+    const endTime = performance.now();
 
-      if (newDegree === 0) {
-        queue.push(successorId);
+    const links = createPertLinks(tasks);
+    const nodes = createPertNodes(result.tasks);
+    const positionedNodes = layoutPertNodes(nodes, links);
+
+    const maxLevel = Math.max(...positionedNodes.map(n => n.level || 0));
+
+    return {
+      taskCount: tasks.length,
+      linkCount: links.length,
+      maxLevel,
+      cycleDetected: false,
+      performanceMetrics: {
+        calculationTime: endTime - startTime,
+        memoryUsage: `${Math.round(JSON.stringify(result).length / 1024)} KB`
       }
-    });
+    };
+  } catch (error) {
+    return {
+      taskCount: tasks.length,
+      linkCount: 0,
+      maxLevel: 0,
+      cycleDetected: error instanceof Error && error.message.includes('Cycle'),
+      performanceMetrics: {
+        calculationTime: performance.now() - startTime,
+        memoryUsage: 'N/A'
+      }
+    };
   }
-
-  if (result.length !== tasks.length) {
-    throw new Error('Cycle détecté dans les dépendances des tâches');
-  }
-
-  return result;
 }
