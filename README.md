@@ -1,21 +1,27 @@
 # Visualisateur de diagrammes GANTT & PERT
-
+Colors: #040642, #6d38e0, #198eb4,
 Une application web moderne permettant de créer et visualiser des diagrammes de GANTT et PERT à partir d'un tableau de tâches. Cette application est développée avec Next.js, React, TypeScript et Tailwind CSS.
 
 ## Table des matières
 
-- [Présentation](#présentation)
-- [Fonctionnalités](#fonctionnalités)
-- [Installation](#installation)
-- [Utilisation](#utilisation)
-  - [Création de tâches](#création-de-tâches)
-  - [Importation de données](#importation-de-données)
-  - [Visualisation des diagrammes](#visualisation-des-diagrammes)
-  - [Exportation des données](#exportation-des-données)
-- [Structure du projet](#structure-du-projet)
-- [Calculs clés](#calculs-clés)
-- [Technologies utilisées](#technologies-utilisées)
-- [Licence](#licence)
+- [Visualisateur de diagrammes GANTT \& PERT](#visualisateur-de-diagrammes-gantt--pert)
+  - [Table des matières](#table-des-matières)
+  - [Présentation](#présentation)
+  - [Fonctionnalités](#fonctionnalités)
+  - [Installation](#installation)
+  - [Utilisation](#utilisation)
+    - [Création de tâches](#création-de-tâches)
+    - [Importation de données](#importation-de-données)
+      - [Format CSV attendu](#format-csv-attendu)
+      - [Format JSON attendu](#format-json-attendu)
+    - [Visualisation des diagrammes](#visualisation-des-diagrammes)
+    - [Exportation des données](#exportation-des-données)
+  - [Structure du projet](#structure-du-projet)
+  - [Calculs clés](#calculs-clés)
+    - [Diagramme de GANTT](#diagramme-de-gantt)
+    - [Diagramme de PERT](#diagramme-de-pert)
+  - [Technologies utilisées](#technologies-utilisées)
+  - [Licence](#licence)
 
 ## Présentation
 
