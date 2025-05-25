@@ -4,17 +4,18 @@
 export interface Task {
   id: string;
   name: string;
-  duration: number; // Durée en jours
-  predecessors: string[]; // IDs des tâches précédentes
-  start?: number; // Date de début (calculée)
-  end?: number; // Date de fin (calculée)
-  earliestStart?: number; // Début au plus tôt (PERT)
-  earliestFinish?: number; // Fin au plus tôt (PERT)
-  latestStart?: number; // Début au plus tard (PERT)
-  latestFinish?: number; // Fin au plus tard (PERT)
-  slack?: number; // Marge (PERT)
-  isCritical?: boolean; // Si la tâche est dans le chemin critique
-  color?: string; // Couleur pour le diagramme (optionnelle)
+  duration: number;
+  predecessors: string[];
+  start?: number;
+  end?: number;
+  earliestStart?: number;
+  earliestFinish?: number;
+  latestStart?: number;
+  latestFinish?: number;
+  slack?: number;
+  isCritical?: boolean;
+  color?: string;
+  level?: number;
 }
 
 // Représentation d'un lien entre deux tâches dans le PERT
@@ -49,6 +50,7 @@ export interface PertNode {
   duration: number;
   x?: number; // Position X (calculée pour le rendu)
   y?: number; // Position Y (calculée pour le rendu)
+  level?: number; // ✅ Ajout de la propriété level manquante
 }
 
 // Format pour l'export des données

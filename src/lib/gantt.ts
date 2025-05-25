@@ -1,238 +1,274 @@
-import { Task, DiagramData } from './types';
+// src/lib/gantt.ts - VERSION ENTIÈREMENT CORRIGÉE
 
-/**
- * Calcule les dates de début et de fin pour chaque tâche dans un diagramme de GANTT
- * @param tasks Liste des tâches
- * @returns Données calculées pour le diagramme de GANTT
- */
+import { Task, DiagramData } from './types';
+import { validateTasks } from './utils';
+
 export function calculateGanttData(tasks: Task[]): DiagramData {
-  // Copie profonde des tâches pour ne pas modifier les originales
+  // ✅ Validation des données d'entrée
+  const validation = validateTasks(tasks);
+  if (!validation.valid) {
+    throw new Error(`Données invalides: ${validation.errors.join(', ')}`);
+  }
+
   const workingTasks = JSON.parse(JSON.stringify(tasks)) as Task[];
-  
-  // Trie topologique pour respecter les dépendances
-  const sortedTasks = topologicalSort(workingTasks);
-  
-  // Calcul des dates de début et de fin
-  calculateStartAndEndDates(sortedTasks);
-  
-  // Calcul du chemin critique
-  const criticalPath = calculateCriticalPath(sortedTasks);
-  
-  // Marquer les tâches critiques
+
+  // 1. Tri topologique CORRIGÉ
+  const sortedTasks = topologicalSortCorrect(workingTasks);
+
+  // 2. Calcul des dates de début et fin (Forward Pass)
+  calculateStartAndEndDatesCorrect(sortedTasks);
+
+  // 3. Calcul des dates au plus tard (Backward Pass)
+  calculateLatestTimesCorrect(sortedTasks);
+
+  // 4. Calcul du chemin critique CORRIGÉ
+  const criticalPath = calculateCriticalPathCorrect(sortedTasks);
+
+  // 5. Marquer les tâches critiques
   markCriticalTasks(sortedTasks, criticalPath);
-  
-  // Calcul de la durée totale du projet
-  const projectDuration = calculateProjectDuration(sortedTasks);
-  
-  // Attribution de couleurs aux tâches
-  assignColors(sortedTasks);
-  
+
+  // 6. Optimiser l'ordre d'affichage
+  const displayTasks = optimizeTaskDisplay(sortedTasks);
+
+  const projectDuration = Math.max(...sortedTasks.map(t => t.end || 0));
+
   return {
-    tasks: sortedTasks,
+    tasks: displayTasks,
     criticalPath,
     projectDuration
   };
 }
 
 /**
- * Trie topologiquement les tâches en fonction de leurs dépendances
- * @param tasks Liste des tâches
- * @returns Liste des tâches triées
+ * TRI TOPOLOGIQUE CORRIGÉ - Algorithme de Kahn
  */
-function topologicalSort(tasks: Task[]): Task[] {
-  // Map pour un accès rapide aux tâches par ID
+function topologicalSortCorrect(tasks: Task[]): Task[] {
   const taskMap = new Map<string, Task>();
-  tasks.forEach(task => taskMap.set(task.id, task));
-  
-  // Ensemble pour suivre les tâches visitées
-  const visited = new Set<string>();
-  // Ensemble pour détecter les cycles
-  const temp = new Set<string>();
-  // Résultat final
-  const result: Task[] = [];
-  
-  // Fonction DFS récursive
-  function dfs(taskId: string): void {
-    // Si déjà dans le résultat, on ignore
-    if (visited.has(taskId)) return;
-    // Si déjà en cours de visite, on a un cycle
-    if (temp.has(taskId)) {
-      console.error(`Cycle détecté dans les dépendances des tâches: ${taskId}`);
-      return;
-    }
-    
-    // Marquer comme en cours de visite
-    temp.add(taskId);
-    
-    // Visiter tous les prédécesseurs
-    const task = taskMap.get(taskId);
-    if (task) {
-      task.predecessors.forEach(predId => {
-        if (taskMap.has(predId)) {
-          dfs(predId);
-        }
-      });
-    }
-    
-    // Marquer comme visité et ajouter au résultat
-    temp.delete(taskId);
-    visited.add(taskId);
-    if (task) {
-      result.unshift(task); // Ajouter au début pour avoir l'ordre topologique inverse
-    }
-  }
-  
-  // Appliquer DFS à toutes les tâches
+  const inDegree = new Map<string, number>();
+  const adjList = new Map<string, string[]>();
+
+  // Initialisation
   tasks.forEach(task => {
-    if (!visited.has(task.id)) {
-      dfs(task.id);
+    taskMap.set(task.id, task);
+    inDegree.set(task.id, 0);
+    adjList.set(task.id, []);
+  });
+
+  // Construire le graphe et calculer les degrés entrants
+  tasks.forEach(task => {
+    task.predecessors.forEach(predId => {
+      if (taskMap.has(predId)) {
+        adjList.get(predId)?.push(task.id);
+        inDegree.set(task.id, (inDegree.get(task.id) || 0) + 1);
+      }
+    });
+  });
+
+  // Queue des nœuds sans prédécesseurs
+  const queue: string[] = [];
+  inDegree.forEach((degree, taskId) => {
+    if (degree === 0) {
+      queue.push(taskId);
     }
   });
-  
+
+  const result: Task[] = [];
+
+  // Algorithme de Kahn
+  while (queue.length > 0) {
+    const currentId = queue.shift()!;
+    const currentTask = taskMap.get(currentId)!;
+    result.push(currentTask);
+
+    // Réduire le degré entrant des successeurs
+    adjList.get(currentId)?.forEach(successorId => {
+      const newDegree = (inDegree.get(successorId) || 0) - 1;
+      inDegree.set(successorId, newDegree);
+
+      if (newDegree === 0) {
+        queue.push(successorId);
+      }
+    });
+  }
+
+  // Vérification de cycle
+  if (result.length !== tasks.length) {
+    throw new Error('Cycle détecté dans les dépendances des tâches');
+  }
+
   return result;
 }
 
 /**
- * Calcule les dates de début et de fin pour chaque tâche
- * @param tasks Liste des tâches triées topologiquement
+ * CALCUL DES DATES DE DÉBUT ET FIN (Forward Pass)
  */
-function calculateStartAndEndDates(tasks: Task[]): void {
-  // Map pour un accès rapide aux tâches par ID
+function calculateStartAndEndDatesCorrect(tasks: Task[]): void {
   const taskMap = new Map<string, Task>();
   tasks.forEach(task => taskMap.set(task.id, task));
-  
-  // Pour chaque tâche dans l'ordre topologique
+
+  // Les tâches sont déjà triées topologiquement
   tasks.forEach(task => {
-    // Si pas de prédécesseurs, commence à 0
     if (task.predecessors.length === 0) {
       task.start = 0;
+      task.earliestStart = 0;
     } else {
-      // Sinon, commence après la fin de tous les prédécesseurs
+      // Une tâche commence APRÈS la fin de TOUS ses prédécesseurs
       task.start = Math.max(
-        ...task.predecessors.map(predId => {
-          const pred = taskMap.get(predId);
-          return pred ? (pred.end || 0) : 0;
-        })
+          ...task.predecessors.map(predId => {
+            const pred = taskMap.get(predId);
+            return pred ? (pred.end || 0) : 0;
+          })
       );
+      task.earliestStart = task.start;
     }
-    
-    // Calcule la date de fin
+
     task.end = (task.start || 0) + task.duration;
+    task.earliestFinish = task.end;
   });
 }
 
 /**
- * Calcule le chemin critique du projet
- * @param tasks Liste des tâches avec dates calculées
- * @returns Liste des IDs des tâches du chemin critique
+ * ✅ CALCUL DES DATES AU PLUS TARD (Backward Pass) - CORRIGÉ
  */
-function calculateCriticalPath(tasks: Task[]): string[] {
-  // Trouver la tâche qui finit en dernier
-  const lastEndTime = Math.max(...tasks.map(t => t.end || 0));
-  const endTasks = tasks.filter(t => t.end === lastEndTime);
-  
-  // Chemin critique (en arrière)
-  const criticalPath: string[] = [];
-  const visited = new Set<string>();
-  
-  // Map pour un accès rapide aux tâches par ID
+function calculateLatestTimesCorrect(tasks: Task[]): void {
   const taskMap = new Map<string, Task>();
   tasks.forEach(task => taskMap.set(task.id, task));
-  
-  // Map inverse pour trouver les successeurs
+
+  // Fin du projet = max des dates de fin
+  const projectEnd = Math.max(...tasks.map(t => t.end || 0));
+
+  // Créer la map des successeurs
   const successorsMap = new Map<string, string[]>();
   tasks.forEach(task => {
+    successorsMap.set(task.id, []);
+  });
+
+  tasks.forEach(task => {
     task.predecessors.forEach(predId => {
-      if (!successorsMap.has(predId)) {
-        successorsMap.set(predId, []);
+      if (successorsMap.has(predId)) {
+        successorsMap.get(predId)?.push(task.id);
       }
-      successorsMap.get(predId)?.push(task.id);
     });
   });
-  
-  // Fonction récursive pour construire le chemin critique en arrière
-  function buildCriticalPath(taskId: string): void {
-    if (visited.has(taskId)) return;
-    visited.add(taskId);
-    criticalPath.push(taskId);
-    
-    const task = taskMap.get(taskId);
-    if (!task) return;
-    
-    // Trouver le prédécesseur critique
-    const criticalPred = task.predecessors
-      .map(predId => taskMap.get(predId))
-      .filter(Boolean)
-      .find(pred => (pred?.end || 0) === (task.start || 0));
-    
-    if (criticalPred) {
-      buildCriticalPath(criticalPred.id);
+
+  // ✅ CORRECTION: Backward pass amélioré
+  [...tasks].reverse().forEach(task => {
+    const successors = successorsMap.get(task.id) || [];
+
+    if (successors.length === 0) {
+      // Tâche finale - peut finir à la fin du projet
+      task.latestFinish = projectEnd;
+    } else {
+      // Finit avant le début au plus tard du plus tôt successeur
+      task.latestFinish = Math.min(
+          ...successors.map(succId => {
+            const succ = taskMap.get(succId);
+            return succ?.latestStart ?? projectEnd;
+          })
+      );
     }
-  }
-  
-  // Commencer par les tâches de fin
-  endTasks.forEach(task => buildCriticalPath(task.id));
-  
-  return criticalPath.reverse(); // Inverser pour avoir l'ordre chronologique
+
+    task.latestStart = (task.latestFinish || 0) - task.duration;
+  });
 }
 
 /**
- * Marque les tâches qui font partie du chemin critique
- * @param tasks Liste des tâches
- * @param criticalPath Liste des IDs des tâches du chemin critique
+ * ✅ CALCUL DU CHEMIN CRITIQUE CORRIGÉ
+ */
+function calculateCriticalPathCorrect(tasks: Task[]): string[] {
+  // Calculer les marges
+  tasks.forEach(task => {
+    task.slack = (task.latestStart || 0) - (task.start || 0);
+  });
+
+  // Le chemin critique = tâches avec marge ≈ 0
+  const criticalTasks = tasks.filter(task => Math.abs(task.slack || 0) < 0.001);
+
+  // Construire le chemin critique ordonné
+  return buildCriticalPathOrdered(criticalTasks);
+}
+
+/**
+ * ✅ CONSTRUIRE LE CHEMIN CRITIQUE DANS L'ORDRE LOGIQUE
+ */
+function buildCriticalPathOrdered(criticalTasks: Task[]): string[] {
+  if (criticalTasks.length === 0) return [];
+
+  // Trier les tâches critiques par date de début
+  const sortedCritical = criticalTasks.sort((a, b) => (a.start || 0) - (b.start || 0));
+
+  // Construire le chemin en suivant les dépendances
+  const criticalPath: string[] = [];
+  const criticalIds = new Set(sortedCritical.map(t => t.id));
+
+  // Commencer par les tâches sans prédécesseurs critiques
+  let currentTasks = sortedCritical.filter(task =>
+      task.predecessors.every(predId => !criticalIds.has(predId))
+  );
+
+  while (currentTasks.length > 0) {
+    // Ajouter la tâche la plus tôt
+    const earliestTask = currentTasks.reduce((earliest, task) =>
+        (task.start || 0) < (earliest.start || 0) ? task : earliest
+    );
+
+    criticalPath.push(earliestTask.id);
+
+    // Trouver les successeurs critiques
+    currentTasks = sortedCritical.filter(task =>
+        !criticalPath.includes(task.id) &&
+        task.predecessors.some(predId => predId === earliestTask.id)
+    );
+  }
+
+  // Ajouter les tâches critiques restantes par ordre chronologique
+  sortedCritical.forEach(task => {
+    if (!criticalPath.includes(task.id)) {
+      criticalPath.push(task.id);
+    }
+  });
+
+  return criticalPath;
+}
+
+/**
+ * ✅ OPTIMISER L'ORDRE D'AFFICHAGE DES TÂCHES
+ */
+function optimizeTaskDisplay(tasks: Task[]): Task[] {
+  return [...tasks].sort((a, b) => {
+    // 1. Par date de début
+    const startDiff = (a.start || 0) - (b.start || 0);
+    if (startDiff !== 0) return startDiff;
+
+    // 2. Tâches critiques en premier à même heure
+    if (a.isCritical && !b.isCritical) return -1;
+    if (!a.isCritical && b.isCritical) return 1;
+
+    // 3. Par durée (plus longues d'abord)
+    const durationDiff = (b.duration || 0) - (a.duration || 0);
+    if (durationDiff !== 0) return durationDiff;
+
+    // 4. Par ordre alphabétique des IDs
+    return a.id.localeCompare(b.id);
+  });
+}
+
+/**
+ * MARQUER LES TÂCHES CRITIQUES
  */
 function markCriticalTasks(tasks: Task[], criticalPath: string[]): void {
   const criticalSet = new Set(criticalPath);
   tasks.forEach(task => {
     task.isCritical = criticalSet.has(task.id);
-  });
-}
 
-/**
- * Calcule la durée totale du projet
- * @param tasks Liste des tâches
- * @returns Durée totale du projet
- */
-function calculateProjectDuration(tasks: Task[]): number {
-  return Math.max(...tasks.map(t => t.end || 0));
-}
-
-/**
- * Attribue des couleurs aux tâches
- * @param tasks Liste des tâches
- */
-function assignColors(tasks: Task[]): void {
-  // Palette de couleurs
-  const colors = [
-    '#4285F4', // Bleu Google
-    '#34A853', // Vert Google
-    '#FBBC05', // Jaune Google
-    '#EA4335', // Rouge Google
-    '#8E24AA', // Violet
-    '#00ACC1', // Cyan
-    '#FB8C00', // Orange
-    '#546E7A'  // Gris bleuté
-  ];
-  
-  // Grouper les tâches par leurs prédécesseurs
-  const groups = new Map<string, Task[]>();
-  
-  tasks.forEach(task => {
-    const key = task.predecessors.sort().join(',') || 'root';
-    if (!groups.has(key)) {
-      groups.set(key, []);
+    // Couleur rouge pour les tâches critiques
+    if (task.isCritical) {
+      task.color = '#DC2626'; // Rouge TailwindCSS
+    } else {
+      // Couleurs variées pour les tâches normales
+      const colors = ['#10B981', '#3B82F6', '#8B5CF6', '#F59E0B'];
+      const index = tasks.indexOf(task) % colors.length;
+      task.color = colors[index];
     }
-    groups.get(key)?.push(task);
-  });
-  
-  // Attribuer des couleurs par groupe
-  let colorIndex = 0;
-  groups.forEach(groupTasks => {
-    const color = colors[colorIndex % colors.length];
-    groupTasks.forEach(task => {
-      // Les tâches critiques restent rouges
-      task.color = task.isCritical ? '#EA4335' : color;
-    });
-    colorIndex++;
   });
 }

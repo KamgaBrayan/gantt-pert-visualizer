@@ -85,3 +85,186 @@ body {
 ::-webkit-scrollbar-thumb:hover {
   background: #94a3b8;
 }
+
+/* Animations pour les éléments de diagramme */
+.task-bar, .node rect {
+  transition: all 0.2s ease-in-out;
+}
+
+.task-bar:hover, .node:hover rect {
+  filter: brightness(0.95) drop-shadow(0 2px 4px rgba(0, 0, 0, 0.15));
+  transform: translateY(-1px);
+}
+
+/* Styles pour les axes des diagrammes */
+.x-axis path,
+.y-axis path {
+  stroke: #9ca3af;
+  stroke-width: 1;
+}
+
+.x-axis line,
+.y-axis line {
+  stroke: #e5e7eb;
+}
+
+.x-axis text,
+.y-axis text {
+  fill: #374151;
+  font-family: system-ui, -apple-system, sans-serif;
+}
+
+/* Grille des diagrammes */
+.grid-line {
+  stroke: #e5e7eb;
+  stroke-dasharray: 2,2;
+  stroke-width: 0.5;
+}
+
+/* Liens/flèches dans les diagrammes */
+.link path {
+  transition: stroke-width 0.2s ease;
+}
+
+.link:hover path {
+  stroke-width: 2.5;
+}
+
+/* Nœuds PERT */
+.node {
+  filter: drop-shadow(0 1px 3px rgba(0, 0, 0, 0.1));
+  transition: filter 0.2s ease;
+}
+
+.node:hover {
+  filter: drop-shadow(0 2px 6px rgba(0, 0, 0, 0.15));
+}
+
+/* Tooltip personnalisé */
+.diagram-tooltip {
+  background: rgba(255, 255, 255, 0.98);
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  box-shadow: 0 10px 25px rgba(0, 0, 0, 0.1);
+  backdrop-filter: blur(8px);
+  font-size: 13px;
+  line-height: 1.4;
+  max-width: 280px;
+  padding: 12px;
+  pointer-events: none;
+  position: absolute;
+  z-index: 1000;
+}
+
+/* Légendes */
+.legend {
+  font-size: 11px;
+  fill: #6b7280;
+}
+
+.legend-item {
+  cursor: default;
+}
+
+/* Conteneurs de diagrammes */
+.diagram-container {
+  background: white;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  overflow: hidden;
+  position: relative;
+}
+
+.diagram-container::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, #e5e7eb, transparent);
+}
+
+/* Texte dans les barres GANTT */
+.task-duration {
+  font-weight: 600;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+  letter-spacing: 0.025em;
+}
+
+/* États des tâches critiques */
+.critical-task {
+  animation: pulse-critical 2s infinite;
+}
+
+@keyframes pulse-critical {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.8;
+  }
+}
+
+/* Responsive design pour les diagrammes */
+@media (max-width: 768px) {
+  .diagram-container {
+    overflow-x: auto;
+  }
+
+  .diagram-tooltip {
+    max-width: 240px;
+    font-size: 12px;
+  }
+}
+
+/* Accessibilité */
+.node:focus,
+.task-bar:focus {
+  outline: 2px solid #3b82f6;
+  outline-offset: 2px;
+}
+
+/* Styles pour les tâches fictives */
+.dummy-task rect {
+  stroke-dasharray: 4,4;
+  fill: #F0FDF4;
+  stroke: #10B981;
+}
+
+.dummy-task text {
+  fill: #10B981;
+}
+
+/* Amélioration du tooltip */
+.diagram-tooltip {
+  min-width: 220px;
+  border: 1px solid #E5E7EB;
+  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+}
+
+/* Styles pour le menu d'export */
+.export-menu {
+  transition: all 0.2s ease;
+  transform-origin: top right;
+}
+
+.export-menu button {
+  transition: background-color 0.1s ease;
+}
+
+.export-menu button:hover {
+  background-color: #F3F4F6;
+}
+
+/* Impression */
+@media print {
+  .diagram-container {
+    border: 1px solid #000;
+    box-shadow: none;
+  }
+
+  .diagram-tooltip {
+    display: none;
+  }
+}
