@@ -1,4 +1,4 @@
-import { Task, PertNode, DiagramData, Link } from './types';
+import { Task, PertNode, DiagramData, Link, PertActivity, PertDiagram } from './types';
 
 /**
  * Calcule les données pour un diagramme PERT
@@ -29,47 +29,290 @@ export function calculatePertData(tasks: Task[]): DiagramData {
     .filter(task => task.isCritical)
     .map(task => task.id);
   
-  // Attribution de couleurs
-  assignColors(sortedTasks);
+  // Créer le diagramme PERT avec événements et activités
+  const pertDiagram = createPertDiagram(sortedTasks);
   
   return {
     tasks: sortedTasks,
     criticalPath,
-    projectDuration
+    projectDuration,
+    pertDiagram
   };
 }
 
+/**
+ * Crée un diagramme PERT avec événements (nœuds) et activités (arêtes)
+ * @param tasks Liste des tâches
+ * @returns Diagramme PERT complet
+ */
+function createPertDiagram(tasks: Task[]): PertDiagram {
+  const nodes: PertNode[] = [];
+  const activities: PertActivity[] = [];
+  const nodeMap = new Map<string, PertNode>();
+  
+  // Créer le nœud de début du projet
+  const startNode: PertNode = {
+    id: 'START',
+    name: 'Début du projet',
+    earliestTime: 0,
+    latestTime: 0,
+    slack: 0,
+    isCritical: true,
+    type: 'start'
+  };
+  nodes.push(startNode);
+  nodeMap.set('START', startNode);
+  
+  // Créer les nœuds pour chaque tâche (événement de fin de tâche)
+  tasks.forEach(task => {
+    const finishNode: PertNode = {
+      id: `FINISH_${task.id}`,
+      name: `Fin de ${task.name}`,
+      earliestTime: task.earliestFinish || 0,
+      latestTime: task.latestFinish || 0,
+      slack: task.slack || 0,
+      isCritical: task.isCritical || false,
+      type: 'milestone'
+    };
+    nodes.push(finishNode);
+    nodeMap.set(`FINISH_${task.id}`, finishNode);
+  });
+  
+  // Créer le nœud de fin du projet
+  const projectDuration = Math.max(...tasks.map(t => t.earliestFinish || 0));
+  const endTasks = tasks.filter(t => (t.earliestFinish || 0) === projectDuration);
+  const endNode: PertNode = {
+    id: 'END',
+    name: 'Fin du projet',
+    earliestTime: projectDuration,
+    latestTime: projectDuration,
+    slack: 0,
+    isCritical: true,
+    type: 'end'
+  };
+  nodes.push(endNode);
+  nodeMap.set('END', endNode);
+  
+  // Créer les activités (tâches sur les arêtes)
+  tasks.forEach(task => {
+    let sourceNodeId: string;
+    
+    // Déterminer le nœud source
+    if (task.predecessors.length === 0) {
+      // Tâche sans prédécesseurs : commence au nœud START
+      sourceNodeId = 'START';
+    } else if (task.predecessors.length === 1) {
+      // Tâche avec un seul prédécesseur
+      sourceNodeId = `FINISH_${task.predecessors[0]}`;
+    } else {
+      // Tâche avec plusieurs prédécesseurs : créer un nœud de convergence
+      const convergenceNodeId = `CONVERGENCE_${task.id}`;
+      const convergenceNode: PertNode = {
+        id: convergenceNodeId,
+        name: `Convergence pour ${task.name}`,
+        earliestTime: task.earliestStart || 0,
+        latestTime: task.latestStart || 0,
+        slack: task.slack || 0,
+        isCritical: task.isCritical || false,
+        type: 'milestone'
+      };
+      nodes.push(convergenceNode);
+      nodeMap.set(convergenceNodeId, convergenceNode);
+      
+      // Créer des activités fictives (durée 0) des prédécesseurs vers le nœud de convergence
+      task.predecessors.forEach(predId => {
+        const dummyActivity: PertActivity = {
+          id: `DUMMY_${predId}_TO_${task.id}`,
+          name: 'Attente',
+          duration: 0,
+          sourceNodeId: `FINISH_${predId}`,
+          targetNodeId: convergenceNodeId,
+          earliestStart: nodeMap.get(`FINISH_${predId}`)?.earliestTime || 0,
+          earliestFinish: task.earliestStart || 0,
+          latestStart: nodeMap.get(`FINISH_${predId}`)?.latestTime || 0,
+          latestFinish: task.latestStart || 0,
+          slack: Math.min(
+            nodeMap.get(`FINISH_${predId}`)?.slack || 0,
+            task.slack || 0
+          ),
+          isCritical: (nodeMap.get(`FINISH_${predId}`)?.isCritical && task.isCritical) || false
+        };
+        activities.push(dummyActivity);
+      });
+      
+      sourceNodeId = convergenceNodeId;
+    }
+    
+    // Créer l'activité principale
+    const activity: PertActivity = {
+      id: task.id,
+      name: task.name,
+      duration: task.duration,
+      sourceNodeId,
+      targetNodeId: `FINISH_${task.id}`,
+      earliestStart: task.earliestStart || 0,
+      earliestFinish: task.earliestFinish || 0,
+      latestStart: task.latestStart || 0,
+      latestFinish: task.latestFinish || 0,
+      slack: task.slack || 0,
+      isCritical: task.isCritical || false
+    };
+    activities.push(activity);
+  });
+  
+  // Créer des activités fictives vers le nœud de fin pour les tâches qui n'ont pas de successeurs
+  const hasSuccessors = new Set<string>();
+  tasks.forEach(task => {
+    task.predecessors.forEach(predId => hasSuccessors.add(predId));
+  });
+  
+  tasks.forEach(task => {
+    if (!hasSuccessors.has(task.id)) {
+      const endActivity: PertActivity = {
+        id: `END_${task.id}`,
+        name: 'Vers fin projet',
+        duration: 0,
+        sourceNodeId: `FINISH_${task.id}`,
+        targetNodeId: 'END',
+        earliestStart: task.earliestFinish || 0,
+        earliestFinish: projectDuration,
+        latestStart: task.latestFinish || 0,
+        latestFinish: projectDuration,
+        slack: task.slack || 0,
+        isCritical: task.isCritical || false
+      };
+      activities.push(endActivity);
+    }
+  });
+  
+  return { nodes, activities };
+}
+
+/**
+ * Organise les nœuds PERT en niveaux pour le rendu
+ * @param pertDiagram Diagramme PERT
+ * @returns Diagramme PERT avec positions calculées
+ */
+export function layoutPertDiagram(pertDiagram: PertDiagram): PertDiagram {
+  const { nodes, activities } = pertDiagram;
+  
+  // Calculer les rangs (niveaux) des nœuds
+  const ranks = calculateNodeRanks(nodes, activities);
+  
+  // Calculer les positions
+  const horizontalSpacing = 250;
+  const verticalSpacing = 120;
+  
+  // Organiser les nœuds par rang
+  const nodesByRank = new Map<number, PertNode[]>();
+  ranks.forEach((rank, nodeId) => {
+    const node = nodes.find(n => n.id === nodeId);
+    if (node) {
+      if (!nodesByRank.has(rank)) {
+        nodesByRank.set(rank, []);
+      }
+      nodesByRank.get(rank)?.push(node);
+    }
+  });
+  
+  // Calculer les positions
+  nodesByRank.forEach((rankNodes, rank) => {
+    const x = rank * horizontalSpacing;
+    rankNodes.forEach((node, index) => {
+      node.x = x;
+      node.y = index * verticalSpacing + 100;
+    });
+  });
+  
+  return { nodes, activities };
+}
+
+/**
+ * Calcule les rangs des nœuds pour le positionnement
+ * @param nodes Liste des nœuds
+ * @param activities Liste des activités
+ * @returns Map des rangs par nœud
+ */
+function calculateNodeRanks(nodes: PertNode[], activities: PertActivity[]): Map<string, number> {
+  const ranks = new Map<string, number>();
+  const incomingCount = new Map<string, number>();
+  const outgoing = new Map<string, string[]>();
+  
+  // Initialiser
+  nodes.forEach(node => {
+    incomingCount.set(node.id, 0);
+    outgoing.set(node.id, []);
+  });
+  
+  // Compter les arêtes entrantes et sortantes
+  activities.forEach(activity => {
+    const currentCount = incomingCount.get(activity.targetNodeId) || 0;
+    incomingCount.set(activity.targetNodeId, currentCount + 1);
+    
+    const currentOutgoing = outgoing.get(activity.sourceNodeId) || [];
+    currentOutgoing.push(activity.targetNodeId);
+    outgoing.set(activity.sourceNodeId, currentOutgoing);
+  });
+  
+  // Algorithme de tri topologique
+  const queue: string[] = [];
+  let currentRank = 0;
+  
+  // Commencer par les nœuds sans prédécesseurs
+  incomingCount.forEach((count, nodeId) => {
+    if (count === 0) {
+      queue.push(nodeId);
+      ranks.set(nodeId, currentRank);
+    }
+  });
+  
+  while (queue.length > 0) {
+    const nextQueue: string[] = [];
+    
+    queue.forEach(nodeId => {
+      const successors = outgoing.get(nodeId) || [];
+      successors.forEach(successorId => {
+        const count = incomingCount.get(successorId) || 0;
+        incomingCount.set(successorId, count - 1);
+        
+        if (count - 1 === 0 && !ranks.has(successorId)) {
+          nextQueue.push(successorId);
+          ranks.set(successorId, currentRank + 1);
+        }
+      });
+    });
+    
+    queue.length = 0;
+    queue.push(...nextQueue);
+    currentRank++;
+  }
+  
+  return ranks;
+}
+
+// Les autres fonctions restent identiques à la version précédente
 /**
  * Trie topologiquement les tâches en fonction de leurs dépendances
  * @param tasks Liste des tâches
  * @returns Liste des tâches triées
  */
 function topologicalSort(tasks: Task[]): Task[] {
-  // Map pour un accès rapide aux tâches par ID
   const taskMap = new Map<string, Task>();
   tasks.forEach(task => taskMap.set(task.id, task));
   
-  // Ensemble pour suivre les tâches visitées
   const visited = new Set<string>();
-  // Ensemble pour détecter les cycles
   const temp = new Set<string>();
-  // Résultat final
   const result: Task[] = [];
   
-  // Fonction DFS récursive
   function dfs(taskId: string): void {
-    // Si déjà dans le résultat, on ignore
     if (visited.has(taskId)) return;
-    // Si déjà en cours de visite, on a un cycle
     if (temp.has(taskId)) {
       console.error(`Cycle détecté dans les dépendances des tâches: ${taskId}`);
       return;
     }
     
-    // Marquer comme en cours de visite
     temp.add(taskId);
     
-    // Visiter tous les prédécesseurs
     const task = taskMap.get(taskId);
     if (task) {
       task.predecessors.forEach(predId => {
@@ -79,22 +322,18 @@ function topologicalSort(tasks: Task[]): Task[] {
       });
     }
     
-    // Marquer comme visité et ajouter au résultat
     temp.delete(taskId);
     visited.add(taskId);
     if (task) {
-      result.unshift(task); // Ajouter au début pour avoir l'ordre topologique inverse
+      result.unshift(task);
     }
   }
   
-  // Identifier toutes les tâches sans prédécesseurs d'abord
   const rootTasks = tasks.filter(task => task.predecessors.length === 0);
   
-  // Si aucune tâche sans prédécesseurs, on commence par n'importe quelle tâche
   if (rootTasks.length === 0 && tasks.length > 0) {
     dfs(tasks[0].id);
   } else {
-    // Sinon, on commence par toutes les tâches sans prédécesseurs
     rootTasks.forEach(task => {
       if (!visited.has(task.id)) {
         dfs(task.id);
@@ -102,7 +341,6 @@ function topologicalSort(tasks: Task[]): Task[] {
     });
   }
   
-  // Ajouter les tâches restantes (pour gérer les composants connectés séparés)
   tasks.forEach(task => {
     if (!visited.has(task.id)) {
       dfs(task.id);
@@ -117,17 +355,13 @@ function topologicalSort(tasks: Task[]): Task[] {
  * @param tasks Liste des tâches triées topologiquement
  */
 function calculateEarliestTimes(tasks: Task[]): void {
-  // Map pour un accès rapide aux tâches par ID
   const taskMap = new Map<string, Task>();
   tasks.forEach(task => taskMap.set(task.id, task));
   
-  // Pour chaque tâche dans l'ordre topologique (avant vers après)
   tasks.forEach(task => {
-    // Si pas de prédécesseurs, commence à 0
     if (task.predecessors.length === 0) {
       task.earliestStart = 0;
     } else {
-      // Sinon, commence après la fin au plus tôt de tous les prédécesseurs
       task.earliestStart = Math.max(
         ...task.predecessors.map(predId => {
           const pred = taskMap.get(predId);
@@ -136,7 +370,6 @@ function calculateEarliestTimes(tasks: Task[]): void {
       );
     }
     
-    // Calcule la date de fin au plus tôt
     task.earliestFinish = (task.earliestStart || 0) + task.duration;
   });
 }
@@ -146,11 +379,9 @@ function calculateEarliestTimes(tasks: Task[]): void {
  * @param tasks Liste des tâches triées topologiquement
  */
 function calculateLatestTimes(tasks: Task[]): void {
-  // Map pour un accès rapide aux tâches par ID
   const taskMap = new Map<string, Task>();
   tasks.forEach(task => taskMap.set(task.id, task));
   
-  // Map inverse pour trouver les successeurs
   const successorsMap = new Map<string, string[]>();
   tasks.forEach(task => {
     task.predecessors.forEach(predId => {
@@ -161,18 +392,14 @@ function calculateLatestTimes(tasks: Task[]): void {
     });
   });
   
-  // Trouver la date de fin du projet (la plus grande date de fin au plus tôt)
   const projectEnd = Math.max(...tasks.map(t => t.earliestFinish || 0));
   
-  // Pour chaque tâche dans l'ordre topologique inverse (après vers avant)
   [...tasks].reverse().forEach(task => {
     const successors = successorsMap.get(task.id) || [];
     
-    // Si pas de successeurs, finit à la fin du projet
     if (successors.length === 0) {
       task.latestFinish = projectEnd;
     } else {
-      // Sinon, finit avant le début au plus tard de tous les successeurs
       task.latestFinish = Math.min(
         ...successors.map(succId => {
           const succ = taskMap.get(succId);
@@ -181,25 +408,18 @@ function calculateLatestTimes(tasks: Task[]): void {
       );
     }
     
-    // Calcule la date de début au plus tard
     task.latestStart = (task.latestFinish || 0) - task.duration;
   });
 }
 
 /**
  * Calcule les marges et identifie le chemin critique
- * Formule pour la marge totale: LS - ES ou LF - EF
  * @param tasks Liste des tâches
  */
 function calculateSlackAndCriticalPath(tasks: Task[]): void {
   tasks.forEach(task => {
-    // Calcul de la marge totale (LS - ES ou LF - EF, les deux sont équivalents)
     task.slack = (task.latestStart || 0) - (task.earliestStart || 0);
-    
-    // Une tâche est critique si sa marge est nulle
     task.isCritical = task.slack === 0;
-    
-    // Mise à jour des dates de début et fin pour le diagramme de Gantt
     task.start = task.earliestStart;
     task.end = task.earliestFinish;
   });
@@ -212,235 +432,4 @@ function calculateSlackAndCriticalPath(tasks: Task[]): void {
  */
 function calculateProjectDuration(tasks: Task[]): number {
   return Math.max(...tasks.map(t => t.earliestFinish || 0));
-}
-
-/**
- * Attribue des couleurs aux tâches
- * @param tasks Liste des tâches
- */
-function assignColors(tasks: Task[]): void {
-  // Palette de couleurs
-  const colors = [
-    '#4285F4', // Bleu Google
-    '#34A853', // Vert Google
-    '#FBBC05', // Jaune Google
-    '#EA4335', // Rouge Google
-    '#8E24AA', // Violet
-    '#00ACC1', // Cyan
-    '#FB8C00', // Orange
-    '#546E7A'  // Gris bleuté
-  ];
-  
-  // Grouper les tâches par niveau topologique
-  const levels = new Map<number, Task[]>();
-  
-  // Calculer le niveau de chaque tâche
-  const taskLevels = new Map<string, number>();
-  
-  // Map pour un accès rapide aux tâches par ID
-  const taskMap = new Map<string, Task>();
-  tasks.forEach(task => taskMap.set(task.id, task));
-  
-  // Calculer le niveau de chaque tâche
-  function calculateLevel(taskId: string, currentLevel: number): number {
-    if (taskLevels.has(taskId)) {
-      return taskLevels.get(taskId) || 0;
-    }
-    
-    const task = taskMap.get(taskId);
-    if (!task) return currentLevel;
-    
-    // Si pas de prédécesseurs, niveau 0
-    if (task.predecessors.length === 0) {
-      taskLevels.set(taskId, 0);
-      return 0;
-    }
-    
-    // Sinon, niveau = max(niveaux des prédécesseurs) + 1
-    const predLevels = task.predecessors.map(predId => 
-      calculateLevel(predId, currentLevel + 1)
-    );
-    
-    const level = Math.max(...predLevels) + 1;
-    taskLevels.set(taskId, level);
-    
-    return level;
-  }
-  
-  // Calculer les niveaux
-  tasks.forEach(task => {
-    const level = calculateLevel(task.id, 0);
-    if (!levels.has(level)) {
-      levels.set(level, []);
-    }
-    levels.get(level)?.push(task);
-  });
-  
-  // Attribuer des couleurs par niveau
-  levels.forEach((levelTasks, level) => {
-    const color = colors[level % colors.length];
-    levelTasks.forEach(task => {
-      // Les tâches critiques restent rouges
-      task.color = task.isCritical ? '#EA4335' : color;
-    });
-  });
-}
-
-/**
- * Crée des nœuds pour le diagramme PERT
- * @param tasks Liste des tâches
- * @returns Liste des nœuds pour le diagramme PERT
- */
-export function createPertNodes(tasks: Task[]): PertNode[] {
-  return tasks.map(task => ({
-    id: task.id,
-    name: task.name,
-    earliestStart: task.earliestStart || 0,
-    earliestFinish: task.earliestFinish || 0,
-    latestStart: task.latestStart || 0,
-    latestFinish: task.latestFinish || 0,
-    slack: task.slack || 0,
-    isCritical: task.isCritical || false,
-    duration: task.duration
-  }));
-}
-
-/**
- * Crée des liens pour le diagramme PERT
- * @param tasks Liste des tâches
- * @returns Liste des liens pour le diagramme PERT
- */
-export function createPertLinks(tasks: Task[]): Link[] {
-  const links: Link[] = [];
-  
-  tasks.forEach(task => {
-    task.predecessors.forEach(predId => {
-      links.push({
-        source: predId,
-        target: task.id,
-        type: 'end-start' // Par défaut, fin-début
-      });
-    });
-  });
-  
-  return links;
-}
-
-/**
- * Organise les nœuds en niveaux pour le diagramme PERT
- * @param nodes Liste des nœuds
- * @param links Liste des liens
- * @returns Nœuds avec positions calculées
- */
-export function layoutPertNodes(nodes: PertNode[], links: Link[]): PertNode[] {
-  // Map pour un accès rapide aux nœuds par ID
-  const nodeMap = new Map<string, PertNode>();
-  nodes.forEach(node => nodeMap.set(node.id, node));
-  
-  // Calculer les niveaux (rangs)
-  const ranks = calculateRanks(nodes, links);
-  
-  // Calculer la position Y pour chaque niveau
-  const yByRank = new Map<number, number>();
-  let y = 0;
-  const verticalSpacing = 100;
-  
-  // Trier les rangs
-  const sortedRanks = Array.from(ranks.keys()).sort((a, b) => a - b);
-  
-  // Calculer la position Y pour chaque rang
-  sortedRanks.forEach(rank => {
-    yByRank.set(rank, y);
-    y += verticalSpacing;
-  });
-  
-  // Calculer la position X pour chaque nœud dans son niveau
-  const horizontalSpacing = 200;
-  
-  sortedRanks.forEach(rank => {
-    const rankNodes = ranks.get(rank) || [];
-    const x0 = (rank * horizontalSpacing);
-    
-    rankNodes.forEach((nodeId, i) => {
-      const node = nodeMap.get(nodeId);
-      if (node) {
-        node.x = x0;
-        node.y = yByRank.get(rank) || 0;
-      }
-    });
-  });
-  
-  return nodes;
-}
-
-/**
- * Calcule les rangs (niveaux) pour le diagramme PERT en utilisant la méthode des niveaux
- * @param nodes Liste des nœuds
- * @param links Liste des liens
- * @returns Map des nœuds par rang
- */
-function calculateRanks(nodes: PertNode[], links: Link[]): Map<number, string[]> {
-  // Map des prédécesseurs de chaque nœud
-  const predecessors = new Map<string, Set<string>>();
-  
-  // Map des successeurs de chaque nœud
-  const successors = new Map<string, Set<string>>();
-  
-  // Initialiser les maps
-  nodes.forEach(node => {
-    predecessors.set(node.id, new Set<string>());
-    successors.set(node.id, new Set<string>());
-  });
-  
-  // Remplir les maps avec les liens
-  links.forEach(link => {
-    predecessors.get(link.target)?.add(link.source);
-    successors.get(link.source)?.add(link.target);
-  });
-  
-  // Rangs des nœuds (niveaux)
-  const ranks = new Map<number, string[]>();
-  
-  // Nœuds visités
-  const visited = new Set<string>();
-  
-  // Niveau 1 : Nœuds sans prédécesseurs (sources)
-  const sources = nodes
-    .filter(node => (predecessors.get(node.id)?.size || 0) === 0)
-    .map(node => node.id);
-  
-  // Rang initial (0)
-  ranks.set(0, [...sources]);
-  sources.forEach(id => visited.add(id));
-  
-  // Calculer les niveaux suivants selon la méthode des niveaux
-  let currentRank = 0;
-  
-  while (visited.size < nodes.length) {
-    const currentNodes = ranks.get(currentRank) || [];
-    const nextRankNodes: string[] = [];
-    
-    currentNodes.forEach(nodeId => {
-      // Parcourir les successeurs
-      successors.get(nodeId)?.forEach(succId => {
-        // Vérifier si tous les prédécesseurs sont visités
-        const predSet = predecessors.get(succId);
-        if (predSet && Array.from(predSet).every(id => visited.has(id))) {
-          // Si tous les prédécesseurs sont visités et le nœud n'est pas déjà visité
-          if (!visited.has(succId)) {
-            nextRankNodes.push(succId);
-            visited.add(succId);
-          }
-        }
-      });
-    });
-    
-    // Passer au rang suivant
-    currentRank++;
-    if (nextRankNodes.length > 0) {
-      ranks.set(currentRank, nextRankNodes);
-    }
-  }
-  
-  return ranks;
 }
