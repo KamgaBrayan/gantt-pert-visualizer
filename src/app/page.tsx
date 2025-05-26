@@ -46,9 +46,13 @@ export default function Home() {
           break;
         case DiagramType.BOTH:
         default:
-          const ganttData = calculateGanttData(tasks);
-          const pertData = calculatePertData(tasks);
-          data = pertData;
+          // Pour BOTH, on utilise les données PERT qui incluent aussi les données Gantt
+          data = calculatePertData(tasks);
+          // On s'assure que les tâches ont aussi les dates start/end pour Gantt
+          data.tasks.forEach(task => {
+            if (task.start === undefined) task.start = task.earliestStart;
+            if (task.end === undefined) task.end = task.earliestFinish;
+          });
           break;
       }
 
