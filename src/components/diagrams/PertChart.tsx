@@ -1,22 +1,337 @@
 'use client';
 
 import React, { useRef, useEffect, useState } from 'react';
-import { Task, PertNode, Link } from '@/lib/types';
-import { formatDuration } from '@/lib/utils';
-import { createPertNodes, createPertLinks, layoutPertNodes } from '@/lib/pert';
+import { Task } from '@/lib/types';
+// formatDuration is not used in the provided snippet for completion.
+// import { formatDuration } from '@/lib/utils';
 import * as d3 from 'd3';
 
 interface PertChartProps {
   tasks: Task[];
-  criticalPath?: string[];
+  criticalPath?: string[]; // Note: criticalPath prop is not directly used for drawing; criticality is derived.
   width?: number;
   height?: number;
-  onTaskClick?: (task: Task) => void;
+  onTaskClick?: (task: Task, taskMetaData: TaskMetaData | undefined) => void; // Modified to include metadata
 }
+
+// Represents an Event in the AOA diagram (a point in time)
+interface PertEventNode {
+  id: string;
+  earliestOccurrence: number; // EO
+  latestOccurrence: number;   // LO
+  label: string;
+  isCritical: boolean;
+  x?: number;
+  y?: number;
+}
+
+// Represents an Activity in the AOA diagram (a task, shown on an arrow)
+interface PertActivityLink {
+  id: string;
+  sourceEventId: string;
+  targetEventId: string;
+  task: Task; // Original Task object or a dummy task
+  isCritical: boolean;
+  isDummy: boolean;
+  // Metadata will be calculated and added here for non-dummy activities
+  metaData?: TaskMetaData;
+}
+
+// Metadata for each task (activity)
+interface TaskMetaData {
+  id: string; // Task ID
+  name: string;
+  duration: number;
+  earliestStart: number;  // ES = EO of source event
+  earliestFinish: number; // EF = ES + duration
+  latestStart: number;    // LS = LF - duration
+  latestFinish: number;   // LF = LO of target event
+  totalSlack: number;     // TS = LS - ES (or LF - EF)
+  freeSlack: number;      // FS = EO of target event - EO of source event - duration
+  isCritical: boolean;
+}
+
+
+function createAOAStructureAndCalculateTimes(tasks: Task[]): {
+  eventNodes: PertEventNode[];
+  activityLinks: PertActivityLink[];
+} {
+  const eventNodes: PertEventNode[] = [];
+  const activityLinks: PertActivityLink[] = [];
+  const eventNodeMap = new Map<string, PertEventNode>();
+  let eventIdCounter = 0;
+
+  const getOrCreateEventNode = (suggestedId?: string, labelOverride?: string): PertEventNode => {
+    const id = suggestedId || `E${eventIdCounter++}`;
+    if (eventNodeMap.has(id)) {
+      return eventNodeMap.get(id)!;
+    }
+    const newEventNode: PertEventNode = {
+      id,
+      earliestOccurrence: 0,
+      latestOccurrence: Infinity,
+      label: labelOverride || id,
+      isCritical: false,
+    };
+    eventNodeMap.set(id, newEventNode);
+    eventNodes.push(newEventNode);
+    return newEventNode;
+  };
+
+  if (tasks.length === 0) {
+    return { eventNodes, activityLinks };
+  }
+
+  const globalStartEvent = getOrCreateEventNode('global_start_event', 'Début');
+  const globalEndEvent = getOrCreateEventNode('global_end_event', 'Fin');
+
+  const taskCompletionEventMap = new Map<string, string>();
+  tasks.forEach(task => {
+    const taskEndEvent = getOrCreateEventNode(`event_task_end_${task.id}`, `Fin ${task.name.substring(0,4)}.`);
+    taskCompletionEventMap.set(task.id, taskEndEvent.id);
+  });
+
+  tasks.forEach(task => {
+    let sourceEventIdForActivity: string;
+    const taskActualEndEventId = taskCompletionEventMap.get(task.id)!;
+
+    if (task.predecessors.length === 0) {
+      sourceEventIdForActivity = globalStartEvent.id;
+    } else {
+      const junctionEventId = `event_junction_before_${task.id}`;
+      const junctionEvent = getOrCreateEventNode(junctionEventId, `Début ${task.name.substring(0,4)}.`);
+      sourceEventIdForActivity = junctionEvent.id;
+
+      task.predecessors.forEach(predTaskId => {
+        const predTaskCompletionEventId = taskCompletionEventMap.get(predTaskId);
+        if (predTaskCompletionEventId) {
+          activityLinks.push({
+            id: `dummy_${predTaskId}_to_${junctionEventId}`,
+            sourceEventId: predTaskCompletionEventId,
+            targetEventId: junctionEvent.id,
+            task: { id: `dummy_${predTaskId}_to_${junctionEventId}`, name: `Fictive vers ${task.name.substring(0,4)}.`, duration: 0, predecessors: [] },
+            isCritical: false,
+            isDummy: true,
+          });
+        }
+      });
+    }
+
+    activityLinks.push({
+      id: task.id,
+      sourceEventId: sourceEventIdForActivity,
+      targetEventId: taskActualEndEventId,
+      task: task,
+      isCritical: false,
+      isDummy: false,
+    });
+  });
+
+  tasks.forEach(task => {
+    const hasSuccessors = tasks.some(succ => succ.predecessors.includes(task.id));
+    if (!hasSuccessors) {
+      const taskActualEndEventId = taskCompletionEventMap.get(task.id)!;
+      activityLinks.push({
+        id: `dummy_${task.id}_to_global_end`,
+        sourceEventId: taskActualEndEventId,
+        targetEventId: globalEndEvent.id,
+        task: { id: `dummy_${task.id}_to_global_end`, name: `Fictive depuis ${task.name.substring(0,4)}.`, duration: 0, predecessors: [] },
+        isCritical: false,
+        isDummy: true,
+      });
+    }
+  });
+
+  // Forward Pass (EO)
+  let eoChanged = true;
+  let eoIterations = 0;
+  const maxIterations = eventNodes.length * eventNodes.length;
+  globalStartEvent.earliestOccurrence = 0;
+
+  while (eoChanged && eoIterations < maxIterations) {
+    eoChanged = false;
+    eoIterations++;
+    eventNodes.forEach(eventNode => {
+      if (eventNode.id === globalStartEvent.id) return;
+      let maxPrevEF = 0;
+      const incomingActivities = activityLinks.filter(link => link.targetEventId === eventNode.id);
+      if (incomingActivities.length > 0) {
+        incomingActivities.forEach(activity => {
+          const sourceEvent = eventNodeMap.get(activity.sourceEventId);
+          if (sourceEvent) {
+            maxPrevEF = Math.max(maxPrevEF, sourceEvent.earliestOccurrence + activity.task.duration);
+          }
+        });
+      }
+      if (eventNode.earliestOccurrence < maxPrevEF) {
+        eventNode.earliestOccurrence = maxPrevEF;
+        eoChanged = true;
+      }
+    });
+  }
+
+  // Backward Pass (LO)
+  const projectDuration = globalEndEvent.earliestOccurrence;
+  globalEndEvent.latestOccurrence = projectDuration;
+  eventNodes.forEach(eventNode => {
+    if (eventNode.id !== globalEndEvent.id) eventNode.latestOccurrence = projectDuration;
+  });
+  if(globalStartEvent) globalStartEvent.latestOccurrence = 0;
+
+
+  let loChanged = true;
+  let loIterations = 0;
+  const eventIdsInReverseOrder = [...eventNodes].sort((a,b) => b.earliestOccurrence - a.earliestOccurrence).map(n => n.id);
+
+  while (loChanged && loIterations < maxIterations) {
+    loChanged = false;
+    loIterations++;
+    for(const eventId of eventIdsInReverseOrder) {
+        const eventNode = eventNodeMap.get(eventId)!;
+        if (eventNode.id === globalEndEvent.id) continue;
+        let minSuccLS = projectDuration;
+        const outgoingActivities = activityLinks.filter(link => link.sourceEventId === eventNode.id);
+        if (outgoingActivities.length > 0) {
+            outgoingActivities.forEach(activity => {
+                const targetEvent = eventNodeMap.get(activity.targetEventId);
+                if (targetEvent) {
+                    minSuccLS = Math.min(minSuccLS, targetEvent.latestOccurrence - activity.task.duration);
+                }
+            });
+        } else if (eventNode.id !== globalEndEvent.id) {
+             minSuccLS = projectDuration;
+        }
+        if (eventNode.latestOccurrence > minSuccLS) {
+            eventNode.latestOccurrence = minSuccLS;
+            loChanged = true;
+        }
+    }
+  }
+
+  // Calculate Criticality and Task MetaData
+  const epsilon = 0.01;
+  eventNodes.forEach(eventNode => {
+    eventNode.isCritical = Math.abs(eventNode.earliestOccurrence - eventNode.latestOccurrence) < epsilon;
+  });
+
+  activityLinks.forEach(link => {
+    const sourceEvent = eventNodeMap.get(link.sourceEventId)!;
+    const targetEvent = eventNodeMap.get(link.targetEventId)!;
+
+    const ES = sourceEvent.earliestOccurrence;
+    const EF = ES + link.task.duration;
+    const LF = targetEvent.latestOccurrence;
+    const LS = LF - link.task.duration;
+    const totalSlack = LS - ES; // or LF - EF
+    // Free Slack for an activity (i,j) = EO_j - EO_i - D_ij
+    const freeSlack = targetEvent.earliestOccurrence - sourceEvent.earliestOccurrence - link.task.duration;
+
+    link.isCritical =
+      sourceEvent.isCritical &&
+      targetEvent.isCritical &&
+      Math.abs(totalSlack) < epsilon;
+      // Math.abs(targetEvent.latestOccurrence - sourceEvent.earliestOccurrence - link.task.duration) < epsilon;
+    
+    if (link.isDummy && sourceEvent.isCritical && targetEvent.isCritical && Math.abs(sourceEvent.earliestOccurrence - targetEvent.earliestOccurrence) < epsilon) {
+        link.isCritical = true;
+    }
+
+    if (!link.isDummy) {
+      link.metaData = {
+        id: link.task.id,
+        name: link.task.name,
+        duration: link.task.duration,
+        earliestStart: ES,
+        earliestFinish: EF,
+        latestStart: LS,
+        latestFinish: LF,
+        totalSlack: Math.max(0, parseFloat(totalSlack.toFixed(2))), // Avoid -0.00 issues
+        freeSlack: Math.max(0, parseFloat(freeSlack.toFixed(2))),   // Avoid -0.00 issues
+        isCritical: link.isCritical,
+      };
+    }
+  });
+  
+  if(globalStartEvent) globalStartEvent.isCritical = Math.abs(globalStartEvent.earliestOccurrence - globalStartEvent.latestOccurrence) < epsilon;
+  if(globalEndEvent) globalEndEvent.isCritical = Math.abs(globalEndEvent.earliestOccurrence - globalEndEvent.latestOccurrence) < epsilon;
+
+  return { eventNodes, activityLinks };
+}
+
+
+function layoutEventNodes(eventNodes: PertEventNode[], activityLinks: PertActivityLink[]): PertEventNode[] {
+  const positionedNodes = [...eventNodes];
+  if (eventNodes.length === 0) return [];
+
+  const levels = new Map<string, number>();
+  const nodeSuccessors = new Map<string, string[]>();
+
+  activityLinks.forEach(link => {
+    if (!nodeSuccessors.has(link.sourceEventId)) {
+      nodeSuccessors.set(link.sourceEventId, []);
+    }
+    nodeSuccessors.get(link.sourceEventId)!.push(link.targetEventId);
+  });
+
+  const queue: string[] = [];
+  eventNodes.forEach(node => {
+    levels.set(node.id, 0);
+    const isSourceNode = !activityLinks.some(link => link.targetEventId === node.id);
+    if (isSourceNode) {
+      queue.push(node.id);
+    }
+  });
+  if (eventNodes.find(n => n.id === 'global_start_event') && !queue.includes('global_start_event') && !activityLinks.some(l => l.targetEventId === 'global_start_event')){
+      if (queue.length > 0 && (levels.get(queue[0]) || 0) > 0) {
+        levels.set('global_start_event',0);
+      } else if (queue.length === 0) {
+        queue.push('global_start_event');
+        levels.set('global_start_event',0);
+      }
+  }
+
+  let head = 0;
+  while(head < queue.length) {
+    const u = queue[head++];
+    const uLevel = levels.get(u) || 0;
+    (nodeSuccessors.get(u) || []).forEach(vId => {
+      const currentVLevel = levels.get(vId) || 0;
+      levels.set(vId, Math.max(currentVLevel, uLevel + 1));
+      if (!queue.slice(head).includes(vId) && !queue.slice(0,head).includes(vId)) {
+          queue.push(vId);
+      }
+    });
+  }
+
+  const levelGroups = new Map<number, string[]>();
+  levels.forEach((level, nodeId) => {
+    if (!levelGroups.has(level)) levelGroups.set(level, []);
+    levelGroups.get(level)!.push(nodeId);
+  });
+
+  const levelWidth = 200;
+  const nodeSpacing = 120;
+
+  positionedNodes.forEach(node => {
+    const level = levels.get(node.id) || 0;
+    const nodesAtLevel = levelGroups.get(level) || [node.id];
+    nodesAtLevel.sort((a,b) => {
+        const nodeA = positionedNodes.find(n=>n.id === a);
+        const nodeB = positionedNodes.find(n=>n.id === b);
+        return (nodeA?.earliestOccurrence ?? 0) - (nodeB?.earliestOccurrence ?? 0) || a.localeCompare(b);
+    });
+    const indexInLevel = nodesAtLevel.indexOf(node.id);
+
+    node.x = level * levelWidth;
+    node.y = (indexInLevel - (nodesAtLevel.length - 1) / 2) * nodeSpacing;
+  });
+
+  return positionedNodes;
+}
+
 
 export default function PertChart({
   tasks,
-  criticalPath = [],
   width = 900,
   height = 600,
   onTaskClick
@@ -26,27 +341,19 @@ export default function PertChart({
   const containerRef = useRef<HTMLDivElement>(null);
   const [dimensions, setDimensions] = useState({ width, height });
   const [isLoading, setIsLoading] = useState(true);
+  const [graphData, setGraphData] = useState<{ eventNodes: PertEventNode[], activityLinks: PertActivityLink[] } | null>(null);
+
   const margin = { top: 80, right: 60, bottom: 60, left: 60 };
   
-  // Couleurs de l'application
   const colors = {
-    primary: '#040642',
-    secondary: '#6d38e0',
-    accent: '#198eb4',
-    background: '#fafbfc',
-    surface: '#ffffff',
-    surfaceHover: '#f8fafc',
-    text: '#1a202c',
-    textSecondary: '#4a5568',
-    textMuted: '#718096',
-    border: '#e2e8f0',
-    borderHover: '#cbd5e0',
-    success: '#48bb78',
-    warning: '#ed8936',
-    critical: '#e53e3e'
+    primary: '#040642', secondary: '#6d38e0', accent: '#198eb4',
+    background: '#fafbfc', surface: '#ffffff', surfaceHover: '#f8fafc',
+    text: '#1a202c', textSecondary: '#4a5568', textMuted: '#718096',
+    border: '#e2e8f0', borderHover: '#cbd5e0',
+    success: '#48bb78', warning: '#ed8936', critical: '#e53e3e',
+    dummyLink: '#b0bec5'
   };
   
-  // État pour suivre les redimensionnements de la fenêtre
   useEffect(() => {
     const handleResize = () => {
       if (containerRef.current) {
@@ -57,675 +364,237 @@ export default function PertChart({
         });
       }
     };
-    
-    // Initial call avec délai pour permettre le rendu
-    setTimeout(() => {
-      handleResize();
-      setIsLoading(false);
-    }, 100);
-    
+    const timer = setTimeout(handleResize, 50);
     window.addEventListener('resize', handleResize);
-    return () => window.removeEventListener('resize', handleResize);
+    return () => { clearTimeout(timer); window.removeEventListener('resize', handleResize); };
   }, [width, height]);
+
+  useEffect(() => {
+    setIsLoading(true);
+    if (tasks && tasks.length > 0) {
+        const data = createAOAStructureAndCalculateTimes(tasks);
+        setGraphData(data);
+    } else {
+        setGraphData(null);
+    }
+    setIsLoading(false);
+  }, [tasks]);
   
   useEffect(() => {
-    if (!svgRef.current || tasks.length === 0 || isLoading) return;
+    if (!svgRef.current || isLoading) return;
     
-    // Nettoyer le SVG
     const svg = d3.select(svgRef.current);
     svg.selectAll('*').remove();
     
-    const tooltip = d3.select(tooltipRef.current);
+    if (!graphData || graphData.eventNodes.length === 0) {
+        if (!isLoading) {
+             const g = svg.attr('width', dimensions.width).attr('height', dimensions.height)
+                .append('g').attr('transform', `translate(${dimensions.width / 2},${dimensions.height / 2})`);
+            g.append('text').text(tasks.length === 0 ? 'Aucune tâche à afficher.' : 'Préparation du diagramme...')
+                .attr('text-anchor', 'middle').attr('font-family', 'Inter, system-ui, sans-serif').attr('fill', colors.textMuted);
+        }
+        return;
+    }
+
+    const { eventNodes: rawEventNodes, activityLinks } = graphData;
+    const positionedEventNodes = layoutEventNodes(rawEventNodes, activityLinks);
     
-    // Dimensions internes
+    const tooltip = d3.select(tooltipRef.current);
     const innerWidth = dimensions.width - margin.left - margin.right;
     const innerHeight = dimensions.height - margin.top - margin.bottom;
     
-    // Groupe principal avec animation d'entrée
-    const g = svg
-      .attr('width', dimensions.width)
-      .attr('height', dimensions.height)
-      .append('g')
-      .attr('transform', `translate(${margin.left},${margin.top})`)
-      .style('opacity', 0);
+    const g = svg.attr('width', dimensions.width).attr('height', dimensions.height)
+      .append('g').attr('transform', `translate(${margin.left},${margin.top})`);
     
-    // Animation d'apparition du graphique
-    g.transition()
-      .duration(800)
-      .ease(d3.easeBackOut.overshoot(1.2))
-      .style('opacity', 1);
-    
-    // Gradient definitions
     const defs = svg.append('defs');
-    
-    // Gradient pour les nœuds normaux
-    const normalGradient = defs.append('linearGradient')
-      .attr('id', 'normalGradient')
-      .attr('x1', '0%').attr('y1', '0%')
-      .attr('x2', '100%').attr('y2', '100%');
-    normalGradient.append('stop')
-      .attr('offset', '0%')
-      .style('stop-color', colors.surface)
-      .style('stop-opacity', 1);
-    normalGradient.append('stop')
-      .attr('offset', '100%')
-      .style('stop-color', '#f7fafc')
-      .style('stop-opacity', 1);
-    
-    // Gradient pour les nœuds critiques
-    const criticalGradient = defs.append('linearGradient')
-      .attr('id', 'criticalGradient')
-      .attr('x1', '0%').attr('y1', '0%')
-      .attr('x2', '100%').attr('y2', '100%');
-    criticalGradient.append('stop')
-      .attr('offset', '0%')
-      .style('stop-color', '#fff5f5')
-      .style('stop-opacity', 1);
-    criticalGradient.append('stop')
-      .attr('offset', '100%')
-      .style('stop-color', '#fed7d7')
-      .style('stop-opacity', 1);
-    
-    // Gradient pour les nœuds hover
-    const hoverGradient = defs.append('linearGradient')
-      .attr('id', 'hoverGradient')
-      .attr('x1', '0%').attr('y1', '0%')
-      .attr('x2', '100%').attr('y2', '100%');
-    hoverGradient.append('stop')
-      .attr('offset', '0%')
-      .style('stop-color', colors.secondary)
-      .style('stop-opacity', 0.1);
-    hoverGradient.append('stop')
-      .attr('offset', '100%')
-      .style('stop-color', colors.accent)
-      .style('stop-opacity', 0.1);
-    
-    // Shadow filter
-    const shadowFilter = defs.append('filter')
-      .attr('id', 'shadow')
-      .attr('x', '-50%').attr('y', '-50%')
-      .attr('width', '200%').attr('height', '200%');
-    shadowFilter.append('feDropShadow')
-      .attr('dx', 0).attr('dy', 4)
-      .attr('stdDeviation', 8)
-      .attr('flood-color', colors.primary)
-      .attr('flood-opacity', 0.1);
-    
-    // Glow filter for critical path
-    const glowFilter = defs.append('filter')
-      .attr('id', 'glow')
-      .attr('x', '-50%').attr('y', '-50%')
-      .attr('width', '200%').attr('height', '200%');
-    glowFilter.append('feGaussianBlur')
-      .attr('stdDeviation', 3)
-      .attr('result', 'coloredBlur');
+    const normalGradient = defs.append('linearGradient').attr('id', 'normalGradient').attr('x1', '0%').attr('y1', '0%').attr('x2', '100%').attr('y2', '100%');
+    normalGradient.append('stop').attr('offset', '0%').style('stop-color', colors.surface).style('stop-opacity', 1);
+    normalGradient.append('stop').attr('offset', '100%').style('stop-color', '#f7fafc').style('stop-opacity', 1);
+    const criticalGradient = defs.append('linearGradient').attr('id', 'criticalGradient').attr('x1', '0%').attr('y1', '0%').attr('x2', '100%').attr('y2', '100%');
+    criticalGradient.append('stop').attr('offset', '0%').style('stop-color', '#fff5f5').style('stop-opacity', 1);
+    criticalGradient.append('stop').attr('offset', '100%').style('stop-color', '#fed7d7').style('stop-opacity', 1);
+    const shadowFilter = defs.append('filter').attr('id', 'shadow').attr('x', '-50%').attr('y', '-50%').attr('width', '200%').attr('height', '200%');
+    shadowFilter.append('feDropShadow').attr('dx', 0).attr('dy', 4).attr('stdDeviation', 6).attr('flood-color', colors.primary).attr('flood-opacity', 0.15);
+    const glowFilter = defs.append('filter').attr('id', 'glow').attr('x', '-50%').attr('y', '-50%').attr('width', '200%').attr('height', '200%');
+    glowFilter.append('feGaussianBlur').attr('stdDeviation', 4).attr('result', 'coloredBlur').attr('flood-color', colors.critical).attr('flood-opacity', 0.75);
     const feMerge = glowFilter.append('feMerge');
     feMerge.append('feMergeNode').attr('in', 'coloredBlur');
     feMerge.append('feMergeNode').attr('in', 'SourceGraphic');
+
+    const xValues = positionedEventNodes.map(d => d.x || 0);
+    const yValues = positionedEventNodes.map(d => d.y || 0);
+    const xExtent = d3.extent(xValues) as [number, number] || [0,0];
+    const yExtent = d3.extent(yValues) as [number, number] || [0,0];
     
-    // Créer les nœuds et les liens
-    const nodes = createPertNodes(tasks);
-    const links = createPertLinks(tasks);
-    
-    // Positionner les nœuds
-    const positionedNodes = layoutPertNodes(nodes, links);
-    
-    // Normaliser les positions des nœuds avec plus d'espace
-    const xExtent = d3.extent(positionedNodes, d => d.x) as [number, number];
-    const yExtent = d3.extent(positionedNodes, d => d.y) as [number, number];
-    
+    const nodeRadius = 30;
+    const arrowMarkerSize = 7;
+
     const xScale = d3.scaleLinear()
-      .domain([xExtent[0] - 150, xExtent[1] + 150])
-      .range([0, innerWidth]);
-    
+      .domain([xExtent[0] - nodeRadius, xExtent[1] + nodeRadius])
+      .range([nodeRadius, innerWidth - nodeRadius]);
     const yScale = d3.scaleLinear()
-      .domain([yExtent[0] - 100, yExtent[1] + 100])
-      .range([0, innerHeight]);
-    
-    // Dessiner les liens (flèches) avec animations
-    const linkPaths = g.selectAll('.link')
-      .data(links)
-      .enter()
-      .append('path')
-      .attr('class', 'link')
+      .domain([yExtent[0] - nodeRadius, yExtent[1] + nodeRadius])
+      .range([nodeRadius, innerHeight - nodeRadius]);
+
+    if (positionedEventNodes.length <= 1) {
+        xScale.domain([-innerWidth / 2, innerWidth / 2]);
+        yScale.domain([-innerHeight / 2, innerHeight / 2]);
+    }
+
+    const addArrowMarker = (id: string, color: string, size: number) => {
+      const marker = defs.append('marker').attr('id', id)
+        .attr('viewBox', `0 -${size/2} ${size} ${size}`)
+        .attr('refX', size).attr('markerWidth', size).attr('markerHeight', size)
+        .attr('orient', 'auto-start-reverse');
+      marker.append('path').attr('d', `M0,-${size/2}L${size},0L0,${size/2}`).attr('fill', color);
+    };
+    addArrowMarker('arrow-normal', colors.textMuted, arrowMarkerSize);
+    addArrowMarker('arrow-critical', colors.critical, arrowMarkerSize * 1.1);
+    addArrowMarker('arrow-dummy', colors.dummyLink, arrowMarkerSize * 0.9);
+    addArrowMarker('arrow-dummy-critical', colors.critical, arrowMarkerSize);
+
+    const linkGroups = g.selectAll('.link-group').data(activityLinks).enter()
+      .append('g').attr('class', 'link-group').style('cursor', d => d.isDummy ? 'default' : 'pointer');
+
+    linkGroups.append('path').attr('class', 'link-path')
       .attr('d', d => {
-        const sourceNode = positionedNodes.find(n => n.id === d.source);
-        const targetNode = positionedNodes.find(n => n.id === d.target);
-        
-        if (!sourceNode || !targetNode) return '';
-        
-        const sourceX = xScale(sourceNode.x || 0) + 140;
-        const sourceY = yScale(sourceNode.y || 0) + 40;
-        const targetX = xScale(targetNode.x || 0);
-        const targetY = yScale(targetNode.y || 0) + 40;
-        
-        const midX = (sourceX + targetX) / 2;
-        const midY = (sourceY + targetY) / 2 - 20;
-        
-        return `M${sourceX},${sourceY} Q${midX},${midY} ${targetX},${targetY}`;
+        const sourceNode = positionedEventNodes.find(n => n.id === d.sourceEventId);
+        const targetNode = positionedEventNodes.find(n => n.id === d.targetEventId);
+        if (!sourceNode || !targetNode || typeof sourceNode.x !== 'number' || typeof targetNode.x !== 'number' ) return '';
+        const sx = xScale(sourceNode.x); const sy = yScale(sourceNode.y);
+        const tx = xScale(targetNode.x); const ty = yScale(targetNode.y);
+        const dx = tx - sx; const dy = ty - sy;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        if (dist === 0) return '';
+        const sourcePadding = nodeRadius; const targetPadding = nodeRadius + arrowMarkerSize;
+        const sourceX = sx + (dx * sourcePadding) / dist; const sourceY = sy + (dy * sourcePadding) / dist;
+        const targetX = tx - (dx * targetPadding) / dist; const targetY = ty - (dy * targetPadding) / dist;
+        return `M${sourceX},${sourceY}L${targetX},${targetY}`;
       })
       .attr('fill', 'none')
-      .attr('stroke', d => {
-        const sourceNode = positionedNodes.find(n => n.id === d.source);
-        const targetNode = positionedNodes.find(n => n.id === d.target);
-        
-        if (!sourceNode || !targetNode) return colors.border;
-        
-        return (sourceNode.isCritical && targetNode.isCritical) ? colors.critical : colors.textMuted;
-      })
-      .attr('stroke-width', d => {
-        const sourceNode = positionedNodes.find(n => n.id === d.source);
-        const targetNode = positionedNodes.find(n => n.id === d.target);
-        
-        return (sourceNode?.isCritical && targetNode?.isCritical) ? 3 : 2;
-      })
-      .attr('stroke-dasharray', function(d) {
-        const sourceNode = positionedNodes.find(n => n.id === d.source);
-        const targetNode = positionedNodes.find(n => n.id === d.target);
-        
-        if (sourceNode?.isCritical && targetNode?.isCritical) {
-          return '0';
-        }
-        return '5,5';
-      })
-      .attr('marker-end', d => {
-        const sourceNode = positionedNodes.find(n => n.id === d.source);
-        const targetNode = positionedNodes.find(n => n.id === d.target);
-        
-        return (sourceNode?.isCritical && targetNode?.isCritical) ? 'url(#arrow-critical)' : 'url(#arrow-normal)';
-      })
-      .style('opacity', 0)
-      .attr('filter', d => {
-        const sourceNode = positionedNodes.find(n => n.id === d.source);
-        const targetNode = positionedNodes.find(n => n.id === d.target);
-        
-        return (sourceNode?.isCritical && targetNode?.isCritical) ? 'url(#glow)' : 'none';
-      });
-    
-    // Animation des liens
-    linkPaths
-      .transition()
-      .delay((d, i) => i * 100)
-      .duration(1000)
-      .ease(d3.easeCircleOut)
-      .style('opacity', 1);
-    
-    // Marqueurs de flèche améliorés
-    const normalArrow = defs.append('marker')
-      .attr('id', 'arrow-normal')
-      .attr('viewBox', '0 -5 10 10')
-      .attr('refX', 8)
-      .attr('markerWidth', 6)
-      .attr('markerHeight', 6)
-      .attr('orient', 'auto');
-    normalArrow.append('path')
-      .attr('d', 'M0,-5L10,0L0,5')
-      .attr('fill', colors.textMuted);
-    
-    const criticalArrow = defs.append('marker')
-      .attr('id', 'arrow-critical')
-      .attr('viewBox', '0 -5 10 10')
-      .attr('refX', 8)
-      .attr('markerWidth', 7)
-      .attr('markerHeight', 7)
-      .attr('orient', 'auto');
-    criticalArrow.append('path')
-      .attr('d', 'M0,-5L10,0L0,5')
-      .attr('fill', colors.critical);
-    
-    // Dessiner les nœuds avec animations
-    const nodeGroups = g.selectAll('.node')
-      .data(positionedNodes)
-      .enter()
-      .append('g')
-      .attr('class', 'node')
-      .attr('transform', d => `translate(${xScale(d.x || 0)}, ${yScale(d.y || 0)})`)
-      .style('cursor', 'pointer')
-      .style('opacity', 0);
-    
-    // Animation d'apparition des nœuds
-    nodeGroups
-      .transition()
-      .delay((d, i) => i * 150 + 500)
-      .duration(800)
-      .ease(d3.easeBackOut.overshoot(1.1))
-      .style('opacity', 1)
-      .attr('transform', d => `translate(${xScale(d.x || 0)}, ${yScale(d.y || 0)}) scale(1)`);
-    
-    // Rectangles pour les nœuds avec design moderne
-    const nodeRects = nodeGroups.append('rect')
-      .attr('width', 140)
-      .attr('height', 80)
-      .attr('rx', 12)
-      .attr('ry', 12)
+      .attr('stroke', d => d.isCritical ? colors.critical : (d.isDummy ? colors.dummyLink : colors.textMuted))
+      .attr('stroke-width', d => d.isCritical ? 2.5 : (d.isDummy ? 1.5 : 2))
+      .attr('stroke-dasharray', d => d.isDummy ? '4,4' : '0')
+      .attr('marker-end', d => d.isCritical ? (d.isDummy ? 'url(#arrow-dummy-critical)' : 'url(#arrow-critical)') : (d.isDummy ? 'url(#arrow-dummy)' : 'url(#arrow-normal)'))
+      .attr('filter', d => d.isCritical && !d.isDummy ? 'url(#glow)' : 'none');
+
+    const activityLabelWidth = 60; const activityLabelHeight = 36;
+    linkGroups.filter(d => !d.isDummy).each(function(d) {
+        const group = d3.select(this);
+        const sourceNode = positionedEventNodes.find(n => n.id === d.sourceEventId);
+        const targetNode = positionedEventNodes.find(n => n.id === d.targetEventId);
+        if (!sourceNode || !targetNode || typeof sourceNode.x !== 'number' || typeof targetNode.x !== 'number' ) return;
+        const midX = (xScale(sourceNode.x) + xScale(targetNode.x)) / 2;
+        const midY = (yScale(sourceNode.y) + yScale(targetNode.y)) / 2;
+        group.append('rect').attr('x', midX - activityLabelWidth / 2).attr('y', midY - activityLabelHeight / 2)
+            .attr('width', activityLabelWidth).attr('height', activityLabelHeight).attr('rx', 6)
+            .attr('fill', d.isCritical ? 'url(#criticalGradient)' : 'url(#normalGradient)')
+            .attr('stroke', d.isCritical ? colors.critical : colors.secondary).attr('stroke-width', d.isCritical ? 1.5 : 1)
+            .attr('filter', 'url(#shadow)');
+        group.append('text').attr('x', midX).attr('y', midY - 5).attr('text-anchor', 'middle').attr('dominant-baseline', 'middle')
+            .attr('fill', d.isCritical ? colors.critical : colors.primary).attr('font-weight', '600').attr('font-size', '10px')
+            .attr('font-family', 'Inter, system-ui, sans-serif')
+            .text(d.task.name.length > 7 ? d.task.name.substring(0, 7) + "..." : d.task.name);
+        group.append('text').attr('x', midX).attr('y', midY + 8).attr('text-anchor', 'middle').attr('dominant-baseline', 'middle')
+            .attr('fill', colors.textSecondary).attr('font-size', '10px').attr('font-family', 'Inter, system-ui, sans-serif')
+            .text(`(${d.task.duration}j)`);
+    });
+
+    const nodeGroups = g.selectAll('.event-node-group').data(positionedEventNodes).enter()
+      .append('g').attr('class', 'event-node-group').attr('transform', d => `translate(${xScale(d.x || 0)}, ${yScale(d.y || 0)})`);
+    nodeGroups.append('circle').attr('r', nodeRadius)
       .attr('fill', d => d.isCritical ? 'url(#criticalGradient)' : 'url(#normalGradient)')
-      .attr('stroke', d => d.isCritical ? colors.critical : colors.secondary)
-      .attr('stroke-width', d => d.isCritical ? 2 : 1.5)
-      .attr('filter', 'url(#shadow)')
-      .style('transition', 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)');
-    
-    // Ligne de séparation élégante
-    nodeGroups.append('line')
-      .attr('x1', 12)
-      .attr('y1', 28)
-      .attr('x2', 128)
-      .attr('y2', 28)
-      .attr('stroke', d => d.isCritical ? colors.critical : colors.secondary)
-      .attr('stroke-width', 1.5)
-      .attr('opacity', 0.6);
-    
-    // Icône de statut (optionnel)
-    nodeGroups.append('circle')
-      .attr('cx', 125)
-      .attr('cy', 15)
-      .attr('r', 4)
-      .attr('fill', d => d.isCritical ? colors.critical : colors.success)
-      .attr('opacity', 0.8);
-    
-    // Titre de la tâche avec meilleure typographie
-    nodeGroups.append('text')
-      .attr('x', 70)
-      .attr('y', 18)
-      .attr('text-anchor', 'middle')
-      .attr('dominant-baseline', 'middle')
-      .attr('fill', d => d.isCritical ? colors.critical : colors.primary)
-      .attr('font-weight', '600')
-      .attr('font-size', '13px')
-      .attr('font-family', 'Inter, system-ui, sans-serif')
-      .text(d => d.name.length > 16 ? d.name.substring(0, 16) + '...' : d.name);
-    
-    // Informations avec layout amélioré
-    const infoY = 45;
-    const infoSpacing = 15;
-    
-    // Première ligne d'informations
-    nodeGroups.append('text')
-      .attr('x', 15)
-      .attr('y', infoY)
-      .attr('fill', colors.textSecondary)
-      .attr('font-size', '11px')
-      .attr('font-weight', '500')
-      .attr('font-family', 'Inter, system-ui, sans-serif')
-      .text(d => `Durée: ${d.duration}j`);
-    
-    nodeGroups.append('text')
-      .attr('x', 85)
-      .attr('y', infoY)
-      .attr('fill', colors.textSecondary)
-      .attr('font-size', '11px')
-      .attr('font-weight', '500')
-      .attr('font-family', 'Inter, system-ui, sans-serif')
-      .text(d => `Marge: ${d.slack}`);
-    
-    // Deuxième ligne d'informations
-    nodeGroups.append('text')
-      .attr('x', 15)
-      .attr('y', infoY + infoSpacing)
-      .attr('fill', colors.textMuted)
-      .attr('font-size', '10px')
-      .attr('font-family', 'Inter, system-ui, sans-serif')
-      .text(d => `Début: ${d.earliestStart}`);
-    
-    nodeGroups.append('text')
-      .attr('x', 85)
-      .attr('y', infoY + infoSpacing)
-      .attr('fill', colors.textMuted)
-      .attr('font-size', '10px')
-      .attr('font-family', 'Inter, system-ui, sans-serif')
-      .text(d => `Fin: ${d.earliestFinish}`);
-    
-    // Légende moderne
-    const legend = svg.append('g')
-      .attr('transform', `translate(${margin.left}, 25)`);
-    
-    // Background de la légende
-    legend.append('rect')
-      .attr('x', -15)
-      .attr('y', -10)
-      .attr('width', 320)
-      .attr('height', 35)
-      .attr('rx', 8)
-      .attr('fill', colors.surface)
-      .attr('stroke', colors.border)
-      .attr('stroke-width', 1)
+      .attr('stroke', d => d.isCritical ? colors.critical : colors.secondary).attr('stroke-width', d => d.isCritical ? 2.5 : 1.5)
       .attr('filter', 'url(#shadow)');
-    
-    // Nœud normal dans la légende
-    legend.append('rect')
-      .attr('width', 18)
-      .attr('height', 12)
-      .attr('fill', 'url(#normalGradient)')
-      .attr('stroke', colors.secondary)
-      .attr('stroke-width', 1.5)
-      .attr('rx', 3);
-    
-    legend.append('text')
-      .attr('x', 25)
-      .attr('y', 9)
-      .text('Tâches normales')
-      .attr('font-size', '12px')
-      .attr('font-weight', '500')
-      .attr('font-family', 'Inter, system-ui, sans-serif')
-      .attr('fill', colors.text);
-    
-    // Nœud critique dans la légende
-    legend.append('rect')
-      .attr('width', 18)
-      .attr('height', 12)
-      .attr('fill', 'url(#criticalGradient)')
-      .attr('stroke', colors.critical)
-      .attr('stroke-width', 1.5)
-      .attr('rx', 3)
-      .attr('transform', 'translate(140, 0)');
-    
-    legend.append('text')
-      .attr('x', 165)
-      .attr('y', 9)
-      .text('Chemin critique')
-      .attr('font-size', '12px')
-      .attr('font-weight', '500')
-      .attr('font-family', 'Inter, system-ui, sans-serif')
-      .attr('fill', colors.text);
-    
-    // Interactions avancées
-    nodeGroups
-      .on('mouseenter', function(event, d) {
-        const node = d3.select(this);
-        const rect = node.select('rect');
-        
-        // Animation de hover
-        rect
-          .transition()
-          .duration(200)
-          .ease(d3.easeCubicOut)
-          .attr('transform', 'scale(1.05)')
-          .attr('fill', 'url(#hoverGradient)')
-          .attr('stroke-width', 2.5)
-          .style('filter', 'url(#shadow) brightness(1.1)');
-        
-        node
-          .transition()
-          .duration(200)
-          .ease(d3.easeCubicOut)
-          .attr('transform', `translate(${xScale(d.x || 0)}, ${yScale(d.y || 0)}) scale(1.02)`);
-        
-        // Afficher le tooltip
-        const task = tasks.find(t => t.id === d.id);
-        if (!task) return;
-        
-        tooltip
-          .style('opacity', 0)
-          .style('left', (event.pageX + 15) + 'px')
-          .style('top', (event.pageY - 10) + 'px')
+    nodeGroups.append('line').attr('x1', -nodeRadius * 0.6).attr('y1', 0).attr('x2', nodeRadius * 0.6).attr('y2', 0)
+      .attr('stroke', d => d.isCritical ? colors.critical : colors.secondary).attr('stroke-width', 0.8).attr('opacity', 0.5);
+    nodeGroups.append('text').attr('y', -nodeRadius * 0.35).attr('text-anchor', 'middle').attr('dominant-baseline', 'middle')
+      .attr('fill', d => d.isCritical ? colors.critical : colors.primary).attr('font-weight', '600').attr('font-size', '11px')
+      .text(d => d.earliestOccurrence);
+    nodeGroups.append('text').attr('y', nodeRadius * 0.35).attr('text-anchor', 'middle').attr('dominant-baseline', 'middle')
+      .attr('fill', colors.textSecondary).attr('font-weight', '500').attr('font-size', '10px')
+      .text(d => d.latestOccurrence);
+    nodeGroups.append('text').attr('y', -nodeRadius - 8).attr('text-anchor', 'middle').attr('dominant-baseline', 'alphabetic')
+      .attr('fill', colors.text).attr('font-weight', '500').attr('font-size', '10px')
+      .text(d => d.label);
+
+    const legendData = [
+        { label: 'Événement (EO/LO)', type: 'event-normal' }, { label: 'Événement Critique', type: 'event-critical' },
+        { label: 'Activité (nom/durée)', type: 'activity-normal' }, { label: 'Activité Critique', type: 'activity-critical' },
+        { label: 'Activité Fictive', type: 'activity-dummy' }
+    ];
+    const legend = svg.append('g').attr('transform', `translate(${margin.left}, 20)`);
+    legendData.forEach((item, i) => {
+        const lg = legend.append('g').attr('transform', `translate(${i * 140}, 0)`);
+        if (item.type === 'event-normal') lg.append('circle').attr('cx', 10).attr('cy', 8).attr('r', 8).attr('fill', 'url(#normalGradient)').attr('stroke', colors.secondary);
+        else if (item.type === 'event-critical') lg.append('circle').attr('cx', 10).attr('cy', 8).attr('r', 8).attr('fill', 'url(#criticalGradient)').attr('stroke', colors.critical);
+        else if (item.type === 'activity-normal') { lg.append('line').attr('x1',0).attr('y1',8).attr('x2',20).attr('y2',8).attr('stroke',colors.textMuted).attr('stroke-width',2).attr('marker-end','url(#arrow-normal)'); lg.append('rect').attr('x',5).attr('y',0).attr('width',10).attr('height',6).attr('fill','url(#normalGradient)').attr('stroke',colors.secondary).attr('stroke-width',0.5); }
+        else if (item.type === 'activity-critical') { lg.append('line').attr('x1',0).attr('y1',8).attr('x2',20).attr('y2',8).attr('stroke',colors.critical).attr('stroke-width',2.5).attr('marker-end','url(#arrow-critical)'); lg.append('rect').attr('x',5).attr('y',0).attr('width',10).attr('height',6).attr('fill','url(#criticalGradient)').attr('stroke',colors.critical).attr('stroke-width',0.5); }
+        else if (item.type === 'activity-dummy') lg.append('line').attr('x1',0).attr('y1',8).attr('x2',20).attr('y2',8).attr('stroke',colors.dummyLink).attr('stroke-width',1.5).attr('stroke-dasharray','2,2').attr('marker-end','url(#arrow-dummy)');
+        lg.append('text').attr('x', 25).attr('y', 12).text(item.label).attr('font-size', '10px').attr('fill', colors.text);
+    });
+
+    linkGroups.filter(d => !d.isDummy)
+      .on('mouseenter', function(event, d: PertActivityLink) {
+        d3.select(this).select('.link-path').attr('stroke-width', d.isCritical ? 3.5 : 3);
+        const meta = d.metaData;
+        tooltip.style('opacity', 1)
           .html(`
-            <div class="tooltip-content">
-              <div class="tooltip-header">
-                <h3>${task.name}</h3>
-                ${d.isCritical ? '<span class="critical-badge">Critique</span>' : ''}
+            <div style="font-family: Inter, system-ui, sans-serif; font-size: 12px; line-height: 1.6;">
+              <div style="margin-bottom: 8px; border-bottom: 1px solid ${colors.border}; padding-bottom: 6px;">
+                <h3 style="margin: 0 0 4px 0; font-size: 14px; color: ${colors.primary}; font-weight: 600;">${d.task.name}</h3>
+                ${d.isCritical ? `<span style="background-color: ${colors.critical}; color: white; padding: 2px 6px; border-radius: 4px; font-size: 10px; font-weight: 500;">Critique</span>` : ''}
               </div>
-              <div class="tooltip-body">
-                <div class="tooltip-row">
-                  <span class="label">Durée:</span>
-                  <span class="value">${formatDuration(task.duration)}</span>
-                </div>
-                <div class="tooltip-row">
-                  <span class="label">Début au plus tôt:</span>
-                  <span class="value">${d.earliestStart}</span>
-                </div>
-                <div class="tooltip-row">
-                  <span class="label">Fin au plus tôt:</span>
-                  <span class="value">${d.earliestFinish}</span>
-                </div>
-                <div class="tooltip-row">
-                  <span class="label">Marge totale:</span>
-                  <span class="value">${d.slack} jours</span>
-                </div>
-                ${task.predecessors.length > 0 ? 
-                  `<div class="tooltip-row">
-                    <span class="label">Prédécesseurs:</span>
-                    <span class="value">${task.predecessors.map(predId => {
-                      const predTask = tasks.find(t => t.id === predId);
-                      return predTask ? predTask.name : predId;
-                    }).join(', ')}</span>
-                  </div>` 
-                  : ''}
-              </div>
+              ${meta ? `
+              <table style="width: 100%; border-collapse: collapse;">
+                <tbody>
+                  <tr><td style="color: ${colors.textSecondary}; padding-right: 10px;">Durée:</td><td style="font-weight: 500; color: ${colors.text};">${meta.duration}j</td></tr>
+                  <tr><td style="color: ${colors.textSecondary};">Début au plus tôt (ES):</td><td style="font-weight: 500; color: ${colors.text};">${meta.earliestStart}</td></tr>
+                  <tr><td style="color: ${colors.textSecondary};">Fin au plus tôt (EF):</td><td style="font-weight: 500; color: ${colors.text};">${meta.earliestFinish}</td></tr>
+                  <tr><td style="color: ${colors.textSecondary};">Début au plus tard (LS):</td><td style="font-weight: 500; color: ${colors.text};">${meta.latestStart}</td></tr>
+                  <tr><td style="color: ${colors.textSecondary};">Fin au plus tard (LF):</td><td style="font-weight: 500; color: ${colors.text};">${meta.latestFinish}</td></tr>
+                  <tr><td style="color: ${colors.textSecondary};">Marge Totale:</td><td style="font-weight: 500; color: ${colors.text};">${meta.totalSlack}j</td></tr>
+                  <tr><td style="color: ${colors.textSecondary};">Marge Libre:</td><td style="font-weight: 500; color: ${colors.text};">${meta.freeSlack}j</td></tr>
+                  <tr><td style="color: ${colors.textSecondary};">Prédécesseurs:</td><td style="font-weight: 500; color: ${colors.text}; max-width: 150px; word-break: break-all;">${d.task.predecessors.length > 0 ? d.task.predecessors.map(p => tasks.find(t=>t.id===p)?.name || p).join(', ') : 'Aucun'}</td></tr>
+                </tbody>
+              </table>` : '<p>Métadonnées non disponibles.</p>'}
             </div>
           `)
-          .transition()
-          .duration(200)
-          .style('opacity', 1);
+          .style('left', (event.pageX + 15) + 'px')
+          .style('top', (event.pageY - 10) + 'px');
       })
-      .on('mouseleave', function(event, d) {
-        const node = d3.select(this);
-        const rect = node.select('rect');
-        
-        // Animation de sortie
-        rect
-          .transition()
-          .duration(300)
-          .ease(d3.easeCubicOut)
-          .attr('transform', 'scale(1)')
-          .attr('fill', d.isCritical ? 'url(#criticalGradient)' : 'url(#normalGradient)')
-          .attr('stroke-width', d.isCritical ? 2 : 1.5)
-          .style('filter', 'url(#shadow)');
-        
-        node
-          .transition()
-          .duration(300)
-          .ease(d3.easeCubicOut)
-          .attr('transform', `translate(${xScale(d.x || 0)}, ${yScale(d.y || 0)}) scale(1)`);
-        
-        tooltip
-          .transition()
-          .duration(150)
-          .style('opacity', 0);
+      .on('mouseleave', function(event, d: PertActivityLink) {
+        d3.select(this).select('.link-path').attr('stroke-width', d.isCritical ? 2.5 : 2);
+        tooltip.style('opacity', 0);
       })
-      .on('click', function(event, d) {
-        // Animation de clic
-        const node = d3.select(this);
-        node
-          .transition()
-          .duration(150)
-          .ease(d3.easeBackIn.overshoot(2))
-          .attr('transform', `translate(${xScale(d.x || 0)}, ${yScale(d.y || 0)}) scale(0.95)`)
-          .transition()
-          .duration(200)
-          .ease(d3.easeBackOut.overshoot(1.5))
-          .attr('transform', `translate(${xScale(d.x || 0)}, ${yScale(d.y || 0)}) scale(1)`);
-        
-        const task = tasks.find(t => t.id === d.id);
-        if (task && onTaskClick) {
-          onTaskClick(task);
+      .on('click', (event, d: PertActivityLink) => {
+        if (onTaskClick && d.task && !d.isDummy) {
+          onTaskClick(d.task, d.metaData); // Pass metadata on click
         }
       });
-    
-    // Zoom avec contraintes améliorées
-    const zoom = d3.zoom<SVGSVGElement, unknown>()
-      .scaleExtent([0.3, 2.5])
-      .translateExtent([[-200, -200], [dimensions.width + 200, dimensions.height + 200]])
-      .on('zoom', (event) => {
-        g.attr('transform', event.transform);
-      });
-    
-    svg.call(zoom);
-    
-    // Contrôles de zoom (optionnel)
-    const zoomControls = svg.append('g')
-      .attr('transform', `translate(${dimensions.width - 80}, ${dimensions.height - 100})`);
-    
-    // Bouton zoom in
-    const zoomInBtn = zoomControls.append('g')
-      .style('cursor', 'pointer')
-      .on('click', () => {
-        svg.transition().call(zoom.scaleBy, 1.5);
-      });
-    
-    zoomInBtn.append('circle')
-      .attr('r', 18)
-      .attr('fill', colors.surface)
-      .attr('stroke', colors.border)
-      .attr('stroke-width', 1.5)
-      .attr('filter', 'url(#shadow)');
-    
-    zoomInBtn.append('text')
-      .attr('text-anchor', 'middle')
-      .attr('dominant-baseline', 'middle')
-      .attr('font-size', '16px')
-      .attr('font-weight', 'bold')
-      .attr('fill', colors.primary)
-      .text('+');
-    
-    // Bouton zoom out
-    const zoomOutBtn = zoomControls.append('g')
-      .attr('transform', 'translate(0, 45)')
-      .style('cursor', 'pointer')
-      .on('click', () => {
-        svg.transition().call(zoom.scaleBy, 0.75);
-      });
-    
-    zoomOutBtn.append('circle')
-      .attr('r', 18)
-      .attr('fill', colors.surface)
-      .attr('stroke', colors.border)
-      .attr('stroke-width', 1.5)
-      .attr('filter', 'url(#shadow)');
-    
-    zoomOutBtn.append('text')
-      .attr('text-anchor', 'middle')
-      .attr('dominant-baseline', 'middle')
-      .attr('font-size', '16px')
-      .attr('font-weight', 'bold')
-      .attr('fill', colors.primary)
-      .text('−');
-    
-  }, [tasks, criticalPath, dimensions, onTaskClick, isLoading]);
-  
-  if (isLoading) {
-    return (
-      <div className="relative w-full" style={{ height: `${height}px` }} ref={containerRef}>
-        <div className="absolute inset-0 flex items-center justify-center bg-gradient-to-br from-gray-50 to-gray-100 rounded-xl">
-          <div className="flex flex-col items-center space-y-4">
-            <div className="relative">
-              <div className="w-12 h-12 border-4 border-gray-200 border-t-purple-600 rounded-full animate-spin"></div>
-              <div className="absolute inset-0 w-12 h-12 border-4 border-transparent border-l-blue-500 rounded-full animate-spin" style={{ animationDirection: 'reverse', animationDuration: '1s' }}></div>
-            </div>
-            <p className="text-gray-600 font-medium">Génération du diagramme PERT...</p>
-          </div>
-        </div>
-      </div>
-    );
-  }
-  
+
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [graphData, dimensions, isLoading, onTaskClick, colors, margin]);
+
   return (
-    <div className="relative w-full bg-gradient-to-br from-gray-50 to-gray-100 rounded-xl overflow-hidden" ref={containerRef}>
-      <svg 
-        ref={svgRef} 
-        className="w-full shadow-lg bg-white"
-        style={{ 
-          background: 'linear-gradient(135deg, #fafbfc 0%, #f7fafc 100%)',
-          fontFamily: 'Inter, system-ui, sans-serif'
-        }}
-      />
+    <div ref={containerRef} style={{ width: '100%', height: '100%', position: 'relative', background: colors.background, overflow: 'hidden' }}>
+      {isLoading && (
+        <div style={{ position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%, -50%)', color: colors.textMuted, fontFamily: 'Inter, system-ui, sans-serif' }}>
+          Chargement du diagramme...
+        </div>
+      )}
+      <svg ref={svgRef}></svg>
       <div
         ref={tooltipRef}
-        className="absolute pointer-events-none opacity-0 z-50 transition-all duration-200 ease-out"
-        style={{ 
-          maxWidth: '320px',
+        style={{
+          position: 'absolute', opacity: 0, pointerEvents: 'none',
+          backgroundColor: colors.surface, color: colors.text,
+          border: `1px solid ${colors.border}`, borderRadius: '8px',
+          padding: '12px', boxShadow: '0 6px 12px rgba(0,0,0,0.15)',
+          minWidth: '250px', maxWidth: '350px', // Adjusted width for more data
+          transition: 'opacity 0.2s ease-in-out', 
         }}
-      >
-        <style jsx>{`
-          .tooltip-content {
-            background: white;
-            border-radius: 12px;
-            padding: 16px;
-            box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04);
-            border: 1px solid #e2e8f0;
-            font-family: 'Inter', system-ui, sans-serif;
-          }
-          .tooltip-header {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            margin-bottom: 12px;
-            padding-bottom: 8px;
-            border-bottom: 1px solid #e2e8f0;
-          }
-          .tooltip-header h3 {
-            margin: 0;
-            font-size: 14px;
-            font-weight: 600;
-            color: #1a202c;
-          }
-          .critical-badge {
-            background: #fed7d7;
-            color: #c53030;
-            padding: 2px 8px;
-            border-radius: 12px;
-            font-size: 10px;
-            font-weight: 600;
-            text-transform: uppercase;
-            letter-spacing: 0.05em;
-          }
-          .tooltip-body {
-            space-y: 8px;
-          }
-          .tooltip-row {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 6px;
-          }
-          .tooltip-row .label {
-            font-size: 12px;
-            color: #4a5568;
-            font-weight: 500;
-          }
-          .tooltip-row .value {
-            font-size: 12px;
-            color: #1a202c;
-            font-weight: 600;
-          }
-        `}</style>
-      </div>
-      
-      {/* Contrôles et informations supplémentaires */}
-      <div className="absolute top-4 right-4 flex space-x-2">
-        {/* Indicateur de tâches critiques */}
-        {criticalPath.length > 0 && (
-          <div className="bg-white/90 backdrop-blur-sm rounded-lg px-3 py-2 shadow-sm border border-gray-200">
-            <div className="flex items-center space-x-2">
-              <div className="w-3 h-3 bg-red-500 rounded-full animate-pulse"></div>
-              <span className="text-sm font-medium text-gray-700">
-                {criticalPath.length} tâche{criticalPath.length > 1 ? 's' : ''} critique{criticalPath.length > 1 ? 's' : ''}
-              </span>
-            </div>
-          </div>
-        )}
-        
-        {/* Statistiques du projet */}
-        <div className="bg-white/90 backdrop-blur-sm rounded-lg px-3 py-2 shadow-sm border border-gray-200">
-          <div className="text-sm">
-            <div className="font-semibold text-gray-800">
-              {tasks.length} tâche{tasks.length > 1 ? 's' : ''}
-            </div>
-            <div className="text-xs text-gray-600">
-              Total du projet
-            </div>
-          </div>
-        </div>
-      </div>
-      
-      {/* Légende des abréviations repositionnée */}
-      <div className="absolute bottom-4 left-4 bg-white/90 backdrop-blur-sm rounded-lg px-4 py-3 shadow-sm border border-gray-200">
-        <h4 className="text-sm font-semibold text-gray-800 mb-2">Légende</h4>
-        <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs text-gray-600">
-          <div><span className="font-medium">D:</span> Durée</div>
-          <div><span className="font-medium">M:</span> Marge</div>
-          <div><span className="font-medium">ES:</span> Début au plus tôt</div>
-          <div><span className="font-medium">EF:</span> Fin au plus tôt</div>
-        </div>
-      </div>
+      ></div>
     </div>
   );
 }

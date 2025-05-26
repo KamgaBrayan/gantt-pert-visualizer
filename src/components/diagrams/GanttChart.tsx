@@ -18,6 +18,11 @@ interface TaskLink {
   target: Task;
 }
 
+interface ScheduledTask extends Task {
+  scheduledStart: number;
+  scheduledEnd: number;
+}
+
 export default function GanttChart({
   tasks,
   criticalPath = [],
@@ -29,7 +34,74 @@ export default function GanttChart({
   const tooltipRef = useRef<HTMLDivElement>(null);
   const [dimensions, setDimensions] = useState({ width, height });
   const [isLoading, setIsLoading] = useState(true);
+  const [scheduledTasks, setScheduledTasks] = useState<ScheduledTask[]>([]);
   const margin = { top: 60, right: 60, bottom: 60, left: 250 };
+  
+  // Function to schedule tasks based on dependencies
+  const scheduleTasks = (inputTasks: Task[]): ScheduledTask[] => {
+    const scheduled: ScheduledTask[] = [];
+    const taskMap = new Map<string, ScheduledTask>();
+    const visited = new Set<string>();
+    const visiting = new Set<string>();
+    
+    // Initialize all tasks with their original data
+    inputTasks.forEach(task => {
+      taskMap.set(task.id, {
+        ...task,
+        scheduledStart: 0,
+        scheduledEnd: task.duration
+      });
+    });
+    
+    // Recursive function to schedule a task and its dependencies
+    const scheduleTask = (taskId: string): number => {
+      if (visited.has(taskId)) {
+        return taskMap.get(taskId)!.scheduledEnd;
+      }
+      
+      if (visiting.has(taskId)) {
+        // Circular dependency detected - handle gracefully
+        console.warn(`Circular dependency detected involving task ${taskId}`);
+        return 0;
+      }
+      
+      visiting.add(taskId);
+      const task = taskMap.get(taskId);
+      if (!task) return 0;
+      
+      let latestPredecessorEnd = 0;
+      
+      // Calculate when this task can start based on predecessors
+      task.predecessors.forEach(predId => {
+        const predEnd = scheduleTask(predId);
+        latestPredecessorEnd = Math.max(latestPredecessorEnd, predEnd);
+      });
+      
+      // Schedule this task to start after all predecessors finish
+      task.scheduledStart = latestPredecessorEnd;
+      task.scheduledEnd = task.scheduledStart + task.duration;
+      
+      visiting.delete(taskId);
+      visited.add(taskId);
+      
+      return task.scheduledEnd;
+    };
+    
+    // Schedule all tasks
+    inputTasks.forEach(task => {
+      scheduleTask(task.id);
+    });
+    
+    // Convert map back to array and sort by scheduled start time
+    return Array.from(taskMap.values()).sort((a, b) => a.scheduledStart - b.scheduledStart);
+  };
+  
+  useEffect(() => {
+    if (tasks.length > 0) {
+      const scheduled = scheduleTasks(tasks);
+      setScheduledTasks(scheduled);
+    }
+  }, [tasks]);
   
   useEffect(() => {
     const handleResize = () => {
@@ -48,7 +120,7 @@ export default function GanttChart({
   }, [width, height]);
   
   useEffect(() => {
-    if (!svgRef.current || tasks.length === 0) return;
+    if (!svgRef.current || scheduledTasks.length === 0) return;
     
     setIsLoading(true);
     
@@ -57,7 +129,7 @@ export default function GanttChart({
       renderChart();
       setIsLoading(false);
     }, 300);
-  }, [tasks, criticalPath, dimensions, onTaskClick]);
+  }, [scheduledTasks, criticalPath, dimensions, onTaskClick]);
   
   const renderChart = () => {
     const svg = d3.select(svgRef.current);
@@ -67,6 +139,9 @@ export default function GanttChart({
     
     const innerWidth = dimensions.width - margin.left - margin.right;
     const innerHeight = dimensions.height - margin.top - margin.bottom;
+    
+    // Calculate project duration
+    const projectDuration = Math.max(...scheduledTasks.map(t => t.scheduledEnd));
     
     // Dégradés pour les barres
     const defs = svg.append('defs');
@@ -121,36 +196,18 @@ export default function GanttChart({
       .append('g')
       .attr('transform', `translate(${margin.left},${margin.top})`);
     
-    // Échelles avec animations
+    // Échelles avec les temps schedulés
     const xScale = d3.scaleLinear()
-      .domain([0, Math.max(...tasks.map(t => t.end || 0))])
+      .domain([0, projectDuration])
       .range([0, innerWidth]);
     
     const yScale = d3.scaleBand<string>()
-      .domain(tasks.map(t => t.id))
+      .domain(scheduledTasks.map(t => t.id))
       .range([0, innerHeight])
       .padding(0.4);
     
     // Grille avec effet de profondeur
     const gridGroup = g.append('g').attr('class', 'grid');
-    
-    // Lignes verticales avec dégradé
-    gridGroup.selectAll('.grid-line')
-      .data(xScale.ticks(8))
-      .enter()
-      .append('line')
-      .attr('class', 'grid-line')
-      .attr('x1', d => xScale(d))
-      .attr('y1', -20)
-      .attr('x2', d => xScale(d))
-      .attr('y2', innerHeight + 20)
-      .attr('stroke', 'url(#gridGradient)')
-      .attr('stroke-width', 1)
-      .attr('opacity', 0)
-      .transition()
-      .duration(800)
-      .delay((d, i) => i * 100)
-      .attr('opacity', 0.3);
     
     // Dégradé pour la grille
     const gridGradient = defs.append('linearGradient')
@@ -173,10 +230,29 @@ export default function GanttChart({
       .attr('stop-color', '#198eb4')
       .attr('stop-opacity', 0.1);
     
+    // Lignes verticales avec dégradé
+    const gridTicks = Math.min(10, Math.max(5, Math.ceil(projectDuration / 5)));
+    gridGroup.selectAll('.grid-line')
+      .data(xScale.ticks(gridTicks))
+      .enter()
+      .append('line')
+      .attr('class', 'grid-line')
+      .attr('x1', d => xScale(d))
+      .attr('y1', -20)
+      .attr('x2', d => xScale(d))
+      .attr('y2', innerHeight + 20)
+      .attr('stroke', 'url(#gridGradient)')
+      .attr('stroke-width', 1)
+      .attr('opacity', 0)
+      .transition()
+      .duration(800)
+      .delay((d, i) => i * 100)
+      .attr('opacity', 0.3);
+    
     // Axe X moderne
     const xAxis = d3.axisTop(xScale)
-      .ticks(8)
-      .tickFormat(d => `J${d}`)
+      .ticks(gridTicks)
+      .tickFormat(d => `J${Math.round(d)}`)
       .tickSize(-10);
     
     const xAxisGroup = g.append('g')
@@ -201,7 +277,7 @@ export default function GanttChart({
     // Axe Y avec animations
     const yAxis = d3.axisLeft(yScale)
       .tickFormat(id => {
-        const task = tasks.find(t => t.id === id);
+        const task = scheduledTasks.find(t => t.id === id);
         return task ? (task.name.length > 30 ? task.name.substring(0, 30) + '...' : task.name) : '';
       })
       .tickSize(0);
@@ -215,7 +291,7 @@ export default function GanttChart({
       .attr('font-size', '13px')
       .attr('font-weight', '500')
       .attr('fill', id => {
-        const task = tasks.find(t => t.id === id);
+        const task = scheduledTasks.find(t => t.id === id);
         return task && criticalPath.includes(task.id) ? '#ff4757' : '#040642';
       })
       .attr('opacity', 0)
@@ -228,13 +304,13 @@ export default function GanttChart({
     
     yAxisGroup.select('.domain').remove();
     
-    // Barres de tâches avec animations sophistiquées
+    // Barres de tâches avec animations sophistiquées (utilisant les temps schedulés)
     const bars = g.selectAll('.task-bar')
-      .data(tasks)
+      .data(scheduledTasks)
       .enter()
       .append('g')
       .attr('class', 'task-bar')
-      .attr('transform', d => `translate(${xScale(d.start || 0)}, ${yScale(d.id)})`)
+      .attr('transform', d => `translate(${xScale(d.scheduledStart)}, ${yScale(d.id)})`)
       .style('cursor', 'pointer');
     
     // Rectangle principal avec animation
@@ -254,7 +330,7 @@ export default function GanttChart({
       .duration(1000)
       .delay((d, i) => i * 150)
       .ease(d3.easeBackOut.overshoot(1.2))
-      .attr('width', d => xScale((d.end || 0) - (d.start || 0)))
+      .attr('width', d => xScale(d.duration))
       .attr('opacity', 1);
     
     // Texte de durée avec animation
@@ -273,27 +349,27 @@ export default function GanttChart({
       .delay((d, i) => i * 150 + 800)
       .attr('opacity', 1);
     
-    // Étiquettes de dates avec style moderne
+    // Étiquettes de dates avec style moderne (utilisant les temps schedulés)
     const dateLabels = bars.append('text')
-      .attr('x', d => xScale((d.end || 0) - (d.start || 0)) + 15)
+      .attr('x', d => xScale(d.duration) + 15)
       .attr('y', yScale.bandwidth() / 2)
       .attr('dy', '0.35em')
       .attr('font-size', '11px')
       .attr('font-weight', '500')
       .attr('fill', '#6d38e0')
       .attr('opacity', 0)
-      .text(d => `J${d.start} → J${d.end}`);
+      .text(d => `J${Math.round(d.scheduledStart)} → J${Math.round(d.scheduledEnd)}`);
     
     dateLabels.transition()
       .duration(600)
       .delay((d, i) => i * 150 + 1000)
       .attr('opacity', 0.8);
     
-    // Liens de dépendances avec animations fluides
+    // Liens de dépendances avec animations fluides (utilisant les temps schedulés)
     const links: TaskLink[] = [];
-    tasks.forEach(task => {
+    scheduledTasks.forEach(task => {
       task.predecessors.forEach(predId => {
-        const predTask = tasks.find(t => t.id === predId);
+        const predTask = scheduledTasks.find(t => t.id === predId);
         if (predTask) {
           links.push({ source: predTask, target: task });
         }
@@ -321,9 +397,9 @@ export default function GanttChart({
       .append('path')
       .attr('class', 'dependency')
       .attr('d', l => {
-        const sourceX = xScale((l.source.end || 0));
+        const sourceX = xScale(l.source.scheduledEnd);
         const sourceY = yScale(l.source.id)! + yScale.bandwidth() / 2;
-        const targetX = xScale((l.target.start || 0));
+        const targetX = xScale(l.target.scheduledStart);
         const targetY = yScale(l.target.id)! + yScale.bandwidth() / 2;
         
         const midX = (sourceX + targetX) / 2;
@@ -363,7 +439,7 @@ export default function GanttChart({
     legend.append('rect')
       .attr('x', -10)
       .attr('y', -5)
-      .attr('width', 320)
+      .attr('width', 380)
       .attr('height', 35)
       .attr('rx', 8)
       .attr('fill', 'rgba(255, 255, 255, 0.9)')
@@ -377,8 +453,9 @@ export default function GanttChart({
     
     // Éléments de légende
     const legendItems = [
-      { color: 'url(#normalGradient)', text: 'Tâches normales', x: 0 },
-      { color: 'url(#criticalGradient)', text: 'Tâches critiques', x: 160 }
+      { color: 'url(#normalGradient)', text: 'Tâches critiques', x: 0 },
+      { color: 'url(#criticalGradient)', text: 'Tâches normales', x: 160 },
+      { color: 'none', text: `Durée totale: ${Math.round(projectDuration)} jours`, x: 320, isText: true }
     ];
     
     legendItems.forEach((item, i) => {
@@ -386,21 +463,31 @@ export default function GanttChart({
         .attr('transform', `translate(${item.x}, 0)`)
         .attr('opacity', 0);
       
-      legendItem.append('rect')
-        .attr('width', 18)
-        .attr('height', 18)
-        .attr('rx', 4)
-        .attr('fill', item.color)
-        .attr('stroke', i === 1 ? '#ff4757' : '#6d38e0')
-        .attr('stroke-width', 1);
-      
-      legendItem.append('text')
-        .attr('x', 25)
-        .attr('y', 13)
-        .attr('font-size', '12px')
-        .attr('font-weight', '500')
-        .attr('fill', '#040642')
-        .text(item.text);
+      if (!item.isText) {
+        legendItem.append('rect')
+          .attr('width', 18)
+          .attr('height', 18)
+          .attr('rx', 4)
+          .attr('fill', item.color)
+          .attr('stroke', i === 1 ? '#ff4757' : '#6d38e0')
+          .attr('stroke-width', 1);
+        
+        legendItem.append('text')
+          .attr('x', 25)
+          .attr('y', 13)
+          .attr('font-size', '12px')
+          .attr('font-weight', '500')
+          .attr('fill', '#040642')
+          .text(item.text);
+      } else {
+        legendItem.append('text')
+          .attr('x', 0)
+          .attr('y', 13)
+          .attr('font-size', '12px')
+          .attr('font-weight', '600')
+          .attr('fill', '#040642')
+          .text(item.text);
+      }
       
       legendItem.transition()
         .duration(600)
@@ -429,14 +516,19 @@ export default function GanttChart({
                 <span class="font-semibold">${formatDuration(d.duration)}</span>
               </div>
               <div class="flex justify-between">
-                <span class="text-gray-600">Période:</span>
-                <span class="font-semibold">J${d.start} → J${d.end}</span>
+                <span class="text-gray-600">Période planifiée:</span>
+                <span class="font-semibold">J${Math.round(d.scheduledStart)} → J${Math.round(d.scheduledEnd)}</span>
               </div>
+              ${d.start !== undefined && d.end !== undefined ? 
+                `<div class="flex justify-between text-sm text-gray-500">
+                  <span>Période originale:</span>
+                  <span>J${d.start} → J${d.end}</span>
+                </div>` : ''}
               ${d.predecessors.length > 0 ? 
                 `<div class="border-t pt-2 mt-2">
                   <div class="text-gray-600 text-sm mb-1">Prédécesseurs:</div>
                   <div class="text-sm font-medium">${d.predecessors.map(predId => {
-                    const predTask = tasks.find(t => t.id === predId);
+                    const predTask = scheduledTasks.find(t => t.id === predId);
                     return predTask ? predTask.name : predId;
                   }).join(', ')}</div>
                 </div>` 
@@ -480,19 +572,32 @@ export default function GanttChart({
             <div className="w-2 h-6 bg-gradient-to-b from-purple-500 to-blue-500 rounded-full mr-3"></div>
             Diagramme de Gantt
           </h3>
-          <p className="text-gray-600 mt-1">Visualisation temporelle des tâches du projet</p>
+          <p className="text-gray-600 mt-1">Visualisation temporelle des tâches du projet avec dépendances</p>
         </div>
         
         <div className="p-6">
           <svg ref={svgRef} className="w-full"></svg>
         </div>
+        
+        {scheduledTasks.length > 0 && (
+          <div className="px-6 pb-6">
+            <div className="text-sm text-gray-600 bg-gray-50 rounded-lg p-3">
+              <div className="flex justify-between items-center">
+                <span>Durée totale du projet:</span>
+                <span className="font-semibold text-purple-600">
+                  {Math.round(Math.max(...scheduledTasks.map(t => t.scheduledEnd)))} jours
+                </span>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
       
       <div
         ref={tooltipRef}
         className="absolute bg-white shadow-2xl rounded-xl p-4 text-sm pointer-events-none opacity-0 z-20 transition-all duration-200 border border-gray-200"
         style={{ 
-          maxWidth: '300px',
+          maxWidth: '350px',
           backdropFilter: 'blur(10px)',
           boxShadow: '0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04)'
         }}
