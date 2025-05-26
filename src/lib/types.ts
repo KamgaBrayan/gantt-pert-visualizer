@@ -36,19 +36,38 @@ export interface TaskImportFormat {
   tasks: Task[];
 }
 
-// Nœud pour le diagramme PERT
+// Nœud pour le diagramme PERT (représente un événement/milestone)
 export interface PertNode {
   id: string;
   name: string;
+  earliestTime: number; // Temps au plus tôt de l'événement
+  latestTime: number; // Temps au plus tard de l'événement
+  slack: number; // Marge de l'événement
+  isCritical: boolean;
+  x?: number; // Position X (calculée pour le rendu)
+  y?: number; // Position Y (calculée pour le rendu)
+  type: 'start' | 'end' | 'milestone'; // Type d'événement
+}
+
+// Activité pour le diagramme PERT (représente une tâche sur une arête)
+export interface PertActivity {
+  id: string;
+  name: string;
+  duration: number;
+  sourceNodeId: string;
+  targetNodeId: string;
   earliestStart: number;
   earliestFinish: number;
   latestStart: number;
   latestFinish: number;
   slack: number;
   isCritical: boolean;
-  duration: number;
-  x?: number; // Position X (calculée pour le rendu)
-  y?: number; // Position Y (calculée pour le rendu)
+}
+
+// Structure complète d'un diagramme PERT
+export interface PertDiagram {
+  nodes: PertNode[];
+  activities: PertActivity[];
 }
 
 // Format pour l'export des données
@@ -56,4 +75,5 @@ export interface DiagramData {
   tasks: Task[];
   criticalPath?: string[]; // Liste des IDs des tâches du chemin critique
   projectDuration?: number; // Durée totale du projet
+  pertDiagram?: PertDiagram; // Diagramme PERT avec nœuds et activités
 }
