@@ -71,7 +71,7 @@ export default function GanttChart({
     // Dégradés pour les barres
     const defs = svg.append('defs');
     
-    // Dégradé pour tâches normales
+    // Dégradé pour tâches normales (BLEU)
     const normalGradient = defs.append('linearGradient')
       .attr('id', 'normalGradient')
       .attr('x1', '0%').attr('y1', '0%')
@@ -79,15 +79,15 @@ export default function GanttChart({
     
     normalGradient.append('stop')
       .attr('offset', '0%')
-      .attr('stop-color', '#198eb4')
+      .attr('stop-color', '#3b82f6') // Bleu vif
       .attr('stop-opacity', 0.9);
     
     normalGradient.append('stop')
       .attr('offset', '100%')
-      .attr('stop-color', '#6d38e0')
-      .attr('stop-opacity', 0.7);
+      .attr('stop-color', '#1d4ed8') // Bleu plus foncé
+      .attr('stop-opacity', 0.8);
     
-    // Dégradé pour tâches critiques
+    // Dégradé pour tâches critiques (ROUGE)
     const criticalGradient = defs.append('linearGradient')
       .attr('id', 'criticalGradient')
       .attr('x1', '0%').attr('y1', '0%')
@@ -95,12 +95,12 @@ export default function GanttChart({
     
     criticalGradient.append('stop')
       .attr('offset', '0%')
-      .attr('stop-color', '#ff6b6b')
+      .attr('stop-color', '#ef4444') // Rouge vif
       .attr('stop-opacity', 0.9);
     
     criticalGradient.append('stop')
       .attr('offset', '100%')
-      .attr('stop-color', '#ff4757')
+      .attr('stop-color', '#dc2626') // Rouge plus foncé
       .attr('stop-opacity', 0.8);
     
     // Filtre de brillance pour les barres
@@ -144,34 +144,13 @@ export default function GanttChart({
       .attr('y1', -20)
       .attr('x2', d => xScale(d))
       .attr('y2', innerHeight + 20)
-      .attr('stroke', 'url(#gridGradient)')
+      .attr('stroke', '#e5e7eb')
       .attr('stroke-width', 1)
       .attr('opacity', 0)
       .transition()
       .duration(800)
       .delay((d, i) => i * 100)
       .attr('opacity', 0.3);
-    
-    // Dégradé pour la grille
-    const gridGradient = defs.append('linearGradient')
-      .attr('id', 'gridGradient')
-      .attr('x1', '0%').attr('y1', '0%')
-      .attr('x2', '0%').attr('y2', '100%');
-    
-    gridGradient.append('stop')
-      .attr('offset', '0%')
-      .attr('stop-color', '#040642')
-      .attr('stop-opacity', 0.1);
-    
-    gridGradient.append('stop')
-      .attr('offset', '50%')
-      .attr('stop-color', '#6d38e0')
-      .attr('stop-opacity', 0.2);
-    
-    gridGradient.append('stop')
-      .attr('offset', '100%')
-      .attr('stop-color', '#198eb4')
-      .attr('stop-opacity', 0.1);
     
     // Axe X moderne
     const xAxis = d3.axisTop(xScale)
@@ -216,7 +195,7 @@ export default function GanttChart({
       .attr('font-weight', '500')
       .attr('fill', id => {
         const task = tasks.find(t => t.id === id);
-        return task && criticalPath.includes(task.id) ? '#ff4757' : '#040642';
+        return task && criticalPath.includes(task.id) ? '#ef4444' : '#040642';
       })
       .attr('opacity', 0)
       .attr('transform', 'translate(-10, 0)')
@@ -237,14 +216,21 @@ export default function GanttChart({
       .attr('transform', d => `translate(${xScale(d.start || 0)}, ${yScale(d.id)})`)
       .style('cursor', 'pointer');
     
-    // Rectangle principal avec animation
+    // Rectangle principal avec animation - COULEURS CORRECTES
     const rects = bars.append('rect')
       .attr('width', 0)
       .attr('height', yScale.bandwidth())
       .attr('rx', 12)
       .attr('ry', 12)
-      .attr('fill', d => criticalPath.includes(d.id) ? 'url(#criticalGradient)' : 'url(#normalGradient)')
-      .attr('stroke', d => criticalPath.includes(d.id) ? '#ff4757' : '#6d38e0')
+      .attr('fill', d => {
+        // Vérifier si la tâche est dans le chemin critique
+        const isCritical = criticalPath.includes(d.id);
+        return isCritical ? 'url(#criticalGradient)' : 'url(#normalGradient)';
+      })
+      .attr('stroke', d => {
+        const isCritical = criticalPath.includes(d.id);
+        return isCritical ? '#dc2626' : '#1d4ed8';
+      })
       .attr('stroke-width', 2)
       .attr('filter', 'url(#glow)')
       .attr('opacity', 0.8);
@@ -280,7 +266,10 @@ export default function GanttChart({
       .attr('dy', '0.35em')
       .attr('font-size', '11px')
       .attr('font-weight', '500')
-      .attr('fill', '#6d38e0')
+      .attr('fill', d => {
+        const isCritical = criticalPath.includes(d.id);
+        return isCritical ? '#dc2626' : '#1d4ed8';
+      })
       .attr('opacity', 0)
       .text(d => `J${d.start} → J${d.end}`);
     
@@ -377,8 +366,8 @@ export default function GanttChart({
     
     // Éléments de légende
     const legendItems = [
-      { color: 'url(#normalGradient)', text: 'Tâches normales', x: 0 },
-      { color: 'url(#criticalGradient)', text: 'Tâches critiques', x: 160 }
+      { color: 'url(#normalGradient)', stroke: '#1d4ed8', text: 'Tâches normales', x: 0 },
+      { color: 'url(#criticalGradient)', stroke: '#dc2626', text: 'Tâches critiques', x: 160 }
     ];
     
     legendItems.forEach((item, i) => {
@@ -391,7 +380,7 @@ export default function GanttChart({
         .attr('height', 18)
         .attr('rx', 4)
         .attr('fill', item.color)
-        .attr('stroke', i === 1 ? '#ff4757' : '#6d38e0')
+        .attr('stroke', item.stroke)
         .attr('stroke-width', 1);
       
       legendItem.append('text')
@@ -431,6 +420,10 @@ export default function GanttChart({
               <div class="flex justify-between">
                 <span class="text-gray-600">Période:</span>
                 <span class="font-semibold">J${d.start} → J${d.end}</span>
+              </div>
+              <div class="flex justify-between">
+                <span class="text-gray-600">Marge:</span>
+                <span class="font-semibold">${d.slack || 0} jours</span>
               </div>
               ${d.predecessors.length > 0 ? 
                 `<div class="border-t pt-2 mt-2">
@@ -477,7 +470,7 @@ export default function GanttChart({
       <div className="bg-gradient-to-br from-white to-gray-50 rounded-2xl shadow-xl overflow-hidden border border-gray-200">
         <div className="p-6 bg-gradient-to-r from-purple-50 to-blue-50 border-b border-gray-200">
           <h3 className="text-xl font-bold text-gray-800 flex items-center">
-            <div className="w-2 h-6 bg-gradient-to-b from-purple-500 to-blue-500 rounded-full mr-3"></div>
+            <div className="w-2 h-6 bg-gradient-to-b from-blue-500 to-red-500 rounded-full mr-3"></div>
             Diagramme de Gantt
           </h3>
           <p className="text-gray-600 mt-1">Visualisation temporelle des tâches du projet</p>
