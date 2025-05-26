@@ -12,20 +12,22 @@ export function calculateGanttData(tasks: Task[]): DiagramData {
   // Trie topologique pour respecter les dépendances
   const sortedTasks = topologicalSort(workingTasks);
   
-  // Calcul des dates de début et de fin
-  calculateStartAndEndDates(sortedTasks);
+  // Calcul des dates au plus tôt (forward pass)
+  calculateEarliestTimes(sortedTasks);
   
-  // Calcul du chemin critique
-  const criticalPath = calculateCriticalPath(sortedTasks);
+  // Calcul des dates au plus tard (backward pass)
+  calculateLatestTimes(sortedTasks);
   
-  // Marquer les tâches critiques
-  markCriticalTasks(sortedTasks, criticalPath);
+  // Calcul des marges et du chemin critique
+  calculateSlackAndCriticalPath(sortedTasks);
   
   // Calcul de la durée totale du projet
   const projectDuration = calculateProjectDuration(sortedTasks);
   
-  // Attribution de couleurs aux tâches
-  assignColors(sortedTasks);
+  // Identifier le chemin critique
+  const criticalPath = sortedTasks
+    .filter(task => task.isCritical)
+    .map(task => task.id);
   
   return {
     tasks: sortedTasks,
@@ -82,7 +84,22 @@ function topologicalSort(tasks: Task[]): Task[] {
     }
   }
   
-  // Appliquer DFS à toutes les tâches
+  // Identifier toutes les tâches sans prédécesseurs d'abord
+  const rootTasks = tasks.filter(task => task.predecessors.length === 0);
+  
+  // Si aucune tâche sans prédécesseurs, on commence par n'importe quelle tâche
+  if (rootTasks.length === 0 && tasks.length > 0) {
+    dfs(tasks[0].id);
+  } else {
+    // Sinon, on commence par toutes les tâches sans prédécesseurs
+    rootTasks.forEach(task => {
+      if (!visited.has(task.id)) {
+        dfs(task.id);
+      }
+    });
+  }
+  
+  // Ajouter les tâches restantes (pour gérer les composants connectés séparés)
   tasks.forEach(task => {
     if (!visited.has(task.id)) {
       dfs(task.id);
@@ -93,48 +110,42 @@ function topologicalSort(tasks: Task[]): Task[] {
 }
 
 /**
- * Calcule les dates de début et de fin pour chaque tâche
+ * Calcule les dates au plus tôt (early start/finish) - Forward Pass
  * @param tasks Liste des tâches triées topologiquement
  */
-function calculateStartAndEndDates(tasks: Task[]): void {
+function calculateEarliestTimes(tasks: Task[]): void {
   // Map pour un accès rapide aux tâches par ID
   const taskMap = new Map<string, Task>();
   tasks.forEach(task => taskMap.set(task.id, task));
   
-  // Pour chaque tâche dans l'ordre topologique
+  // Pour chaque tâche dans l'ordre topologique (avant vers après)
   tasks.forEach(task => {
     // Si pas de prédécesseurs, commence à 0
     if (task.predecessors.length === 0) {
+      task.earliestStart = 0;
       task.start = 0;
     } else {
-      // Sinon, commence après la fin de tous les prédécesseurs
-      task.start = Math.max(
+      // Sinon, commence après la fin au plus tôt de tous les prédécesseurs
+      task.earliestStart = Math.max(
         ...task.predecessors.map(predId => {
           const pred = taskMap.get(predId);
-          return pred ? (pred.end || 0) : 0;
+          return pred ? (pred.earliestFinish || 0) : 0;
         })
       );
+      task.start = task.earliestStart;
     }
     
-    // Calcule la date de fin
-    task.end = (task.start || 0) + task.duration;
+    // Calcule la date de fin au plus tôt
+    task.earliestFinish = (task.earliestStart || 0) + task.duration;
+    task.end = task.earliestFinish;
   });
 }
 
 /**
- * Calcule le chemin critique du projet
- * @param tasks Liste des tâches avec dates calculées
- * @returns Liste des IDs des tâches du chemin critique
+ * Calcule les dates au plus tard (late start/finish) - Backward Pass
+ * @param tasks Liste des tâches triées topologiquement
  */
-function calculateCriticalPath(tasks: Task[]): string[] {
-  // Trouver la tâche qui finit en dernier
-  const lastEndTime = Math.max(...tasks.map(t => t.end || 0));
-  const endTasks = tasks.filter(t => t.end === lastEndTime);
-  
-  // Chemin critique (en arrière)
-  const criticalPath: string[] = [];
-  const visited = new Set<string>();
-  
+function calculateLatestTimes(tasks: Task[]): void {
   // Map pour un accès rapide aux tâches par ID
   const taskMap = new Map<string, Task>();
   tasks.forEach(task => taskMap.set(task.id, task));
@@ -150,89 +161,55 @@ function calculateCriticalPath(tasks: Task[]): string[] {
     });
   });
   
-  // Fonction récursive pour construire le chemin critique en arrière
-  function buildCriticalPath(taskId: string): void {
-    if (visited.has(taskId)) return;
-    visited.add(taskId);
-    criticalPath.push(taskId);
+  // Trouver la date de fin du projet (la plus grande date de fin au plus tôt)
+  const projectEnd = Math.max(...tasks.map(t => t.earliestFinish || 0));
+  
+  // Pour chaque tâche dans l'ordre topologique inverse (après vers avant)
+  [...tasks].reverse().forEach(task => {
+    const successors = successorsMap.get(task.id) || [];
     
-    const task = taskMap.get(taskId);
-    if (!task) return;
-    
-    // Trouver le prédécesseur critique
-    const criticalPred = task.predecessors
-      .map(predId => taskMap.get(predId))
-      .filter(Boolean)
-      .find(pred => (pred?.end || 0) === (task.start || 0));
-    
-    if (criticalPred) {
-      buildCriticalPath(criticalPred.id);
+    // Si pas de successeurs, finit à la fin du projet
+    if (successors.length === 0) {
+      task.latestFinish = projectEnd;
+    } else {
+      // Sinon, finit avant le début au plus tard de tous les successeurs
+      task.latestFinish = Math.min(
+        ...successors.map(succId => {
+          const succ = taskMap.get(succId);
+          return succ ? (succ.latestStart || projectEnd) : projectEnd;
+        })
+      );
     }
-  }
-  
-  // Commencer par les tâches de fin
-  endTasks.forEach(task => buildCriticalPath(task.id));
-  
-  return criticalPath.reverse(); // Inverser pour avoir l'ordre chronologique
+    
+    // Calcule la date de début au plus tard
+    task.latestStart = (task.latestFinish || 0) - task.duration;
+  });
 }
 
 /**
- * Marque les tâches qui font partie du chemin critique
+ * Calcule les marges et identifie le chemin critique
+ * Formule pour la marge totale: LS - ES ou LF - EF
  * @param tasks Liste des tâches
- * @param criticalPath Liste des IDs des tâches du chemin critique
  */
-function markCriticalTasks(tasks: Task[], criticalPath: string[]): void {
-  const criticalSet = new Set(criticalPath);
+function calculateSlackAndCriticalPath(tasks: Task[]): void {
   tasks.forEach(task => {
-    task.isCritical = criticalSet.has(task.id);
+    // Calcul de la marge totale (LS - ES ou LF - EF, les deux sont équivalents)
+    task.slack = (task.latestStart || 0) - (task.earliestStart || 0);
+    
+    // Une tâche est critique si sa marge est nulle (ou très proche de zéro)
+    task.isCritical = Math.abs(task.slack) < 0.001; // Tolérance pour les erreurs de précision
+    
+    // S'assurer que les dates de début et fin sont définies
+    if (task.start === undefined) task.start = task.earliestStart;
+    if (task.end === undefined) task.end = task.earliestFinish;
   });
 }
 
 /**
  * Calcule la durée totale du projet
- * @param tasks Liste des tâches
+ * @param tasks Liste des tâches avec dates calculées
  * @returns Durée totale du projet
  */
 function calculateProjectDuration(tasks: Task[]): number {
-  return Math.max(...tasks.map(t => t.end || 0));
-}
-
-/**
- * Attribue des couleurs aux tâches
- * @param tasks Liste des tâches
- */
-function assignColors(tasks: Task[]): void {
-  // Palette de couleurs
-  const colors = [
-    '#4285F4', // Bleu Google
-    '#34A853', // Vert Google
-    '#FBBC05', // Jaune Google
-    '#EA4335', // Rouge Google
-    '#8E24AA', // Violet
-    '#00ACC1', // Cyan
-    '#FB8C00', // Orange
-    '#546E7A'  // Gris bleuté
-  ];
-  
-  // Grouper les tâches par leurs prédécesseurs
-  const groups = new Map<string, Task[]>();
-  
-  tasks.forEach(task => {
-    const key = task.predecessors.sort().join(',') || 'root';
-    if (!groups.has(key)) {
-      groups.set(key, []);
-    }
-    groups.get(key)?.push(task);
-  });
-  
-  // Attribuer des couleurs par groupe
-  let colorIndex = 0;
-  groups.forEach(groupTasks => {
-    const color = colors[colorIndex % colors.length];
-    groupTasks.forEach(task => {
-      // Les tâches critiques restent rouges
-      task.color = task.isCritical ? '#EA4335' : color;
-    });
-    colorIndex++;
-  });
+  return Math.max(...tasks.map(t => t.earliestFinish || t.end || 0));
 }
