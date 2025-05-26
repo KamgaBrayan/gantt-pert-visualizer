@@ -26,7 +26,7 @@ export default function DiagramResult({
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [showExportMenu, setShowExportMenu] = useState(false);
   
-  const { tasks, criticalPath = [], projectDuration = 0 } = diagramData;
+  const { tasks, criticalPath = [], projectDuration = 0, pertDiagram } = diagramData;
   
   // Trouver la tâche sélectionnée
   const selectedTask = selectedTaskId 
@@ -107,7 +107,8 @@ export default function DiagramResult({
             <PertChart 
               tasks={tasks} 
               criticalPath={criticalPath}
-              height={600}
+              pertDiagram={pertDiagram}
+              height={700}
               onTaskClick={handleTaskClick}
             />
           </div>
@@ -254,6 +255,18 @@ export default function DiagramResult({
                     </div>
                   </div>
                   
+                  <div className="grid grid-cols-2 gap-4">
+                    <div className="bg-gradient-to-br from-purple-50 to-pink-50 p-4 rounded-xl border border-purple-100">
+                      <div className="text-sm font-medium text-gray-600 mb-1">Début au plus tôt</div>
+                      <div className="text-lg font-bold text-purple-600">J{selectedTask.earliestStart || selectedTask.start}</div>
+                    </div>
+                    
+                    <div className="bg-gradient-to-br from-green-50 to-emerald-50 p-4 rounded-xl border border-green-100">
+                      <div className="text-sm font-medium text-gray-600 mb-1">Marge</div>
+                      <div className="text-lg font-bold text-green-600">{selectedTask.slack || 0}j</div>
+                    </div>
+                  </div>
+                  
                   {selectedTask.predecessors.length > 0 && (
                     <div className="bg-gray-50 p-4 rounded-xl border border-gray-100">
                       <h4 className="text-sm font-semibold text-gray-700 mb-2 flex items-center">
@@ -276,7 +289,7 @@ export default function DiagramResult({
                     </div>
                   )}
                   
-                  {selectedTask.isCritical && (
+                  {criticalPath.includes(selectedTask.id) && (
                     <div className="bg-gradient-to-r from-red-50 to-pink-50 border border-red-200 p-4 rounded-xl">
                       <div className="flex items-center space-x-2">
                         <svg className="w-5 h-5 text-red-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
